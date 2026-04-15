@@ -62,8 +62,8 @@ def load_json_file(json_file):
 def get_max_num_attempts():
     return int(
         open(
-            f"slurm/configs/max_num_attempts_{os.getenv('EVALUATION_DATASET')}.txt"
-        ).read()
+            f"slurm/configs/max_num_attempts_{os.getenv('EVALUATION_DATASET')}.txt",
+        ).read(),
     )
 
 
@@ -72,8 +72,8 @@ def get_max_parallel_jobs():
         return 1
     return int(
         open(
-            f"slurm/configs/max_num_parallel_jobs_{os.getenv('EVALUATION_DATASET')}.txt"
-        ).read()
+            f"slurm/configs/max_num_parallel_jobs_{os.getenv('EVALUATION_DATASET')}.txt",
+        ).read(),
     )
 
 
@@ -89,7 +89,7 @@ def get_num_running_jobs(job_name, username=None):
                     shell=True,
                 )
                 .decode("utf-8")
-                .strip()
+                .strip(),
             )
         except subprocess.CalledProcessError as e:
             print(f"Error getting number of running jobs: {e}")
@@ -106,7 +106,7 @@ def get_num_running_jobs(job_name, username=None):
                 shell=True,
             )
             .decode("utf-8")
-            .strip()
+            .strip(),
         )
     except subprocess.CalledProcessError as e:
         print(f"Error getting number of running jobs: {e}")
@@ -136,13 +136,13 @@ def submit_job(job_name, script_path, num_attempt):
     if not is_on_slurm():
         submit_command = f"bash {script_path} > {std_out_file} 2> {std_err_file}"
     else:
-        partition = ""
-        if (
-            num_attempt > 10
-        ):  # set to 10 to avoid memory issues. we dont really need this anymore but i don t want to remove it
-            partition = "--partition=a100-preemptable-galvani"  # Use A100 GPUs for more than 2 attempts due to potential memory issues
+        extra = ""
+        # If the job has failed multiple times, most properly because of memory issues, switch to a more powerful partition
+        if num_attempt > 4:
+            partition = "L40Sday" if "TCML" in os.environ else "a100-galvani"
+            extra = f"--partition {partition} --gres gpu:1"
 
-        submit_command = f"sbatch --job-name {job_route_name} --output {std_out_file} --error {std_err_file} {partition} {script_path}"
+        submit_command = f"sbatch --job-name {job_route_name} --output {std_out_file} --error {std_err_file} {extra} {script_path}"
 
     # Submit jobs and return job ID
     try:
@@ -153,7 +153,9 @@ def submit_job(job_name, script_path, num_attempt):
             pid = output.decode("utf-8").strip().split()[-1]
         else:
             process = subprocess.Popen(
-                submit_command, shell=True, start_new_session=True
+                submit_command,
+                shell=True,
+                start_new_session=True,
             )
             pid = process.pid
         return pid, process
@@ -196,12 +198,13 @@ def aggregate_metrics():
     eval_dataset = os.getenv("EVALUATION_DATASET")
     merge_route_json(eval_output_dir + "/eval")
     shutil.copyfile(
-        eval_output_dir + "/eval/merged.json", eval_output_dir + "/merged.json"
+        eval_output_dir + "/eval/merged.json",
+        eval_output_dir + "/merged.json",
     )
     try:
         if "bench2drive" not in eval_dataset:
             os.system(
-                f"""python3 scripts/tools/evaluation/result_parser.py --xml data/{eval_dataset}.xml --results {eval_output_dir}/eval"""  # noqa: E501
+                f"""python3 scripts/tools/evaluation/result_parser.py --xml data/{eval_dataset}.xml --results {eval_output_dir}/eval""",  # noqa: E501
             )
             shutil.copyfile(
                 eval_output_dir + "/eval/results.csv",

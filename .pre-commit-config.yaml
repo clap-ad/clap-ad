@@ -29,11 +29,6 @@ repos:
         args: [--fix]
       - id: ruff-format
 
-  # - repo: https://github.com/DetachHead/basedpyright-pre-commit-mirror
-  #   rev: 1.36.2
-  #   hooks:
-  #       - id: basedpyright
-
   - repo: https://github.com/efrecon/pre-commit-hook-lxml
     rev: v0.1.4
     hooks:
@@ -53,13 +48,11 @@ repos:
             --exclude=lead/training/rfs.py,
             --check-yield-types=false,
             lead/,
-            tests/
           ]
         pass_filenames: false
         always_run: true
         types: [python]
 
-    # Markdown linting
   - repo: https://github.com/executablebooks/mdformat
     rev: 0.7.17
     hooks:
@@ -70,13 +63,18 @@ repos:
         pass_filenames: false
         always_run: true
 
-    # Markdown linting
-  - repo: https://github.com/executablebooks/mdformat
-    rev: 0.7.17
+  - repo: https://github.com/tox-dev/pyproject-fmt
+    rev: "v2.21.1"
     hooks:
-      - id: mdformat
-        additional_dependencies:
-          - mdformat-gfm
-          - mdformat-black
+      - id: pyproject-fmt
         pass_filenames: false
         always_run: true
+        args:
+          [
+            pyproject.toml
+          ]
+
+  - repo: https://github.com/asottile/add-trailing-comma
+    rev: v4.0.0
+    hooks:
+    -   id: add-trailing-comma

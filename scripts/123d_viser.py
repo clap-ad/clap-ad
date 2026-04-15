@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Hotkey script to start Viser viewer for visualizing 123D scenes.
 By default, you can open viewer via: http://localhost:8080
@@ -91,7 +92,7 @@ def main():
                 # Only restart for new files (not directories)
                 if not event.is_directory:
                     print(
-                        f"\n[Viser] New scene file detected: {event.src_path}. Restarting viewer..."
+                        f"\n[Viser] New scene file detected: {event.src_path}. Restarting viewer...",
                     )
                     self.restart_callback()
 

@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torchmetrics
 from beartype import beartype
 from torch.nn import functional as F
 
@@ -70,12 +71,13 @@ class BEVDecoder(nn.Module):
                         config=self.config,
                         center_x=center_x,
                         center_y=center_y,
-                    )
+                    ),
                 )
 
         # Register as parameter so that it will automatically be moved to the correct GPU with the rest of the network
         self.valid_bev_pixels = valid_bev_pixels.unsqueeze(0).to(
-            dtype=self.config.torch_float_type, device=device
+            dtype=self.config.torch_float_type,
+            device=device,
         )  # (1, H, W)
 
     @beartype
@@ -96,7 +98,9 @@ class BEVDecoder(nn.Module):
 
         # Mask for samples from the correct source dataset
         source_dataset = data["source_dataset"].to(
-            pred.device, dtype=torch.long, non_blocking=True
+            pred.device,
+            dtype=torch.long,
+            non_blocking=True,
         )  # (B,)
         source_mask = (source_dataset == self.source_data).float()  # (B,)
         if source_mask.sum() == 0:
@@ -107,7 +111,9 @@ class BEVDecoder(nn.Module):
             prefix = ""
 
         label = data[f"{prefix}bev_semantic"].to(
-            pred.device, dtype=torch.long, non_blocking=True
+            pred.device,
+            dtype=torch.long,
+            non_blocking=True,
         )
         visible_label = self.mask_label(label).long()  # Mark invisible pixels to -1
 
@@ -128,6 +134,33 @@ class BEVDecoder(nn.Module):
 
         # Add dataset name prefix
         loss[f"{prefix}loss_bev_semantic"] = loss_bev
+
+        if (
+            "iteration" in data
+            and ((data["iteration"] + 1) % self.config.log_scalars_frequency) == 0
+        ):
+            subset = source_mask.bool()
+            log[f"{prefix}bev_semantic/output_min"] = pred.min().item()
+            log[f"{prefix}bev_semantic/output_max"] = pred.max().item()
+            pred_classes = pred[subset].argmax(dim=1)
+            subset_label = visible_label[subset]
+            valid_pixels = subset_label >= 0
+            if valid_pixels.any():
+                miou = torchmetrics.functional.jaccard_index(
+                    pred_classes[valid_pixels],
+                    subset_label[valid_pixels],
+                    task="multiclass",
+                    num_classes=self.num_classes,
+                )
+                f1 = torchmetrics.functional.f1_score(
+                    pred_classes[valid_pixels],
+                    subset_label[valid_pixels],
+                    task="multiclass",
+                    num_classes=self.num_classes,
+                    average="macro",
+                )
+                log[f"{prefix}metric/bev_semantic_miou"] = miou.item()
+                log[f"{prefix}metric/bev_semantic_f1"] = f1.item()
 
     @beartype
     def forward(self, bev_feature_grid: torch.Tensor, log: dict):

@@ -8,8 +8,6 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from tqdm import tqdm
-
 
 def make_bash(
     data_save_root: str,
@@ -26,8 +24,8 @@ def make_bash(
     scenario_name: str,
     jobname: str,
     partition_name: str,
-    py123d_format: bool = False,
-    timeout: str = "0-01:00",
+    py123d_format: bool,
+    timeout: str,
 ) -> str:
     os.makedirs(f"{data_save_root}/stderr", exist_ok=True)
     os.makedirs(f"{data_save_root}/stdout", exist_ok=True)
@@ -61,16 +59,6 @@ echo "SLURM_JOB_ID: $SLURM_JOB_ID"
 echo "SLURM_JOB_NODELIST: $SLURM_JOB_NODELIST"
 scontrol show job $SLURM_JOB_ID
 
-dt=$(date '+%d/%m/%Y %H:%M:%S');
-echo "Job started: $dt"
-
-echo "Current branch:"
-git branch
-echo "Current commit:"
-git log -1
-echo "Current hash:"
-git rev-parse HEAD
-
 
 export FREE_STREAMING_PORT=$(random_free_port.sh)
 export FREE_WORLD_PORT=$(random_free_port.sh)
@@ -79,6 +67,8 @@ export TM_PORT=$(random_free_port.sh)
 sleep 2
 
 echo "start python"
+which python
+which python3
 pwd
 
 export SCENARIO_RUNNER_ROOT={code_dir}/3rd_party/scenario_runner_autopilot
@@ -204,13 +194,16 @@ def cancel_jobs_with_err_in_log(logroot: str, jobname: str, user_name: str) -> N
             terminate = True
         if terminate:
             print(
-                f"Terminating route {rf_num} with pid {pid_list[i]} due to error in logfile."
+                f"Terminating route {rf_num} with pid {pid_list[i]} due to error in logfile.",
             )
             subprocess.check_output(f"scancel {pid_list[i]}", shell=True)
 
 
 def wait_for_jobs_to_finish(
-    logroot: str, jobname: str, user_name: str, max_n_parallel_jobs: int
+    logroot: str,
+    jobname: str,
+    user_name: str,
+    max_n_parallel_jobs: int,
 ) -> None:
     currently_running_jobs, _, _ = get_running_jobs(jobname, user_name)
     print(f"{currently_running_jobs}/{max_n_parallel_jobs} jobs are running...")
@@ -231,10 +224,11 @@ def get_num_jobs(job_name: str, username: str) -> tuple[int, int]:
             shell=True,
         )
         .decode("utf-8")
-        .replace("\n", "")
+        .replace("\n", ""),
     )
     with open(
-        "slurm/configs/max_num_parallel_jobs_collect_data.txt", encoding="utf-8"
+        "slurm/configs/max_num_parallel_jobs_collect_data.txt",
+        encoding="utf-8",
     ) as f:
         max_num_parallel_jobs = int(f.read())
 
@@ -275,7 +269,10 @@ def is_job_done(result_file: str) -> bool:
 def arg_parse() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Collect dataset")
     parser.add_argument(
-        "--root_folder", type=str, default="data/", help="Root folder for data"
+        "--root_folder",
+        type=str,
+        default="data/",
+        help="Root folder for data",
     )
     parser.add_argument(
         "--route_folder",
@@ -301,7 +298,7 @@ if __name__ == "__main__":
     username = os.environ["USER"]
     code_root = os.getcwd()
     carla_root = os.getcwd() + "/3rd_party/CARLA_0915"
-    max_route_per_scenario_type = 51  # -1 means no limit
+    max_route_per_scenario_type = -1  # -1 means no limit
 
     # Configure based on data format
     if args.py123d:
@@ -309,7 +306,7 @@ if __name__ == "__main__":
         dataset_name = "carla_leaderboard2_py123d"
     else:
         agent = f"{code_root}/lead/expert/expert.py"
-        dataset_name = "carla_leaderboard2"
+        dataset_name = "carla_leaderboard2_6cameras"
 
     scenario_white_lists = []  # Empty list = all scenarios allowed
     scenario_blacklist = ["YieldToEmergencyVehicle"]  # Scenarios to exclude
@@ -340,34 +337,21 @@ if __name__ == "__main__":
         ]
         print(f"Applied scenario blacklist. Total routes: {len(routes)}")
 
-    # Apply max_route_per_scenario_type constraint
+    # Apply max_route_per_scenario_type constraint.
+    # Scenario type is the parent directory name (e.g. .../Accident/1054_0.xml),
+    # so we avoid parsing every XML file which is very slow on network disks.
     if max_route_per_scenario_type > 0:
         scenario_type_counts = {}
         filtered_routes = []
-        for route in tqdm(routes, desc="Filtering routes by scenario type"):
-            try:
-                tree = ET.parse(route)
-                root = tree.getroot()
-                scenario_elem = root.find("route/scenarios/scenario")
-                scenario_type = (
-                    scenario_elem.attrib["type"]
-                    if scenario_elem is not None
-                    else "noScenarios"
-                )
-
-                if scenario_type not in scenario_type_counts:
-                    scenario_type_counts[scenario_type] = 0
-
-                if scenario_type_counts[scenario_type] < max_route_per_scenario_type:
-                    filtered_routes.append(route)
-                    scenario_type_counts[scenario_type] += 1
-            except Exception as e:
-                print(f"Warning: Could not parse scenario type from route {route}: {e}")
-                # Include route anyway if parsing fails
+        for route in routes:
+            scenario_type = os.path.basename(os.path.dirname(route)) or "noScenarios"
+            count = scenario_type_counts.get(scenario_type, 0)
+            if count < max_route_per_scenario_type:
                 filtered_routes.append(route)
+                scenario_type_counts[scenario_type] = count + 1
         routes = filtered_routes
         print(
-            f"Applied max_route_per_scenario_type={max_route_per_scenario_type}. Total routes: {len(routes)}"
+            f"Applied max_route_per_scenario_type={max_route_per_scenario_type}. Total routes: {len(routes)}",
         )
 
     port_offset = 0
@@ -435,6 +419,7 @@ if __name__ == "__main__":
                 job_name,
                 random.choice(partitions),
                 py123d_format=args.py123d,
+                timeout="0-03:00:00" if args.py123d else "0-01:00:00",
             )
 
             if is_job_done(ckpt_endpoint):
@@ -442,17 +427,19 @@ if __name__ == "__main__":
             else:
                 # Wait until submitting new jobs that the #jobs are at below max
                 num_running_jobs, max_num_parallel_jobs = get_num_jobs(
-                    job_name=job_name, username=username
+                    job_name=job_name,
+                    username=username,
                 )
                 print(f"{num_running_jobs}/{max_num_parallel_jobs} jobs are running...")
                 while num_running_jobs >= max_num_parallel_jobs:
                     num_running_jobs, max_num_parallel_jobs = get_num_jobs(
-                        job_name=job_name, username=username
+                        job_name=job_name,
+                        username=username,
                     )
                     time.sleep(0.05)
 
                 print(
-                    f"Submitting job {job_number}/{num_routes}: {job_name}_{routefile_number}. "
+                    f"Submitting job {job_number}/{num_routes}: {job_name}_{routefile_number}. ",
                 )
                 time.sleep(1)
                 jobid = (
@@ -483,7 +470,8 @@ if __name__ == "__main__":
             job_finished, job_file, result_file, resubmitted = meta_jobs[k]
             need_to_resubmit = False
             with open(
-                "slurm/configs/max_num_attempts_collect_data.txt", encoding="utf-8"
+                "slurm/configs/max_num_attempts_collect_data.txt",
+                encoding="utf-8",
             ) as f:
                 max_attempts = int(f.read())
             if not job_finished and resubmitted < max_attempts:
@@ -491,10 +479,11 @@ if __name__ == "__main__":
                 if (
                     int(
                         subprocess.check_output(
-                            f"squeue | grep {k} | wc -l", shell=True
+                            f"squeue | grep {k} | wc -l",
+                            shell=True,
                         )
                         .decode("utf-8")
-                        .strip()
+                        .strip(),
                     )
                     == 0
                 ):
@@ -533,7 +522,7 @@ if __name__ == "__main__":
                 # rename old error files to still access it
                 routefile_number = Path(job_file).stem
                 print(
-                    f"Resubmit job {routefile_number} (previous id: {k}). Waiting for jobs to finish..."
+                    f"Resubmit job {routefile_number} (previous id: {k}). Waiting for jobs to finish...",
                 )
 
                 with open(
@@ -542,20 +531,23 @@ if __name__ == "__main__":
                 ) as f:
                     max_num_parallel_jobs = int(f.read())
                 wait_for_jobs_to_finish(
-                    log_root, job_name, username, max_num_parallel_jobs
+                    log_root,
+                    job_name,
+                    username,
+                    max_num_parallel_jobs,
                 )
 
                 time_now_log = time.time()
                 os.system(
-                    f'mkdir -p "{log_root}/run_files/logs_{routefile_number}_{time_now_log}"'
+                    f'mkdir -p "{log_root}/run_files/logs_{routefile_number}_{time_now_log}"',
                 )
                 os.system(
                     f"cp {log_root}/run_files/logs/qsub_err{routefile_number}.log {log_root}/ \
-                          run_files/logs_{routefile_number}_{time_now_log}"
+                          run_files/logs_{routefile_number}_{time_now_log}",
                 )
                 os.system(
                     f"cp {log_root}/run_files/logs/qsub_out{routefile_number}.log {log_root}/ \
-                          run_files/logs_{routefile_number}_{time_now_log}"
+                          run_files/logs_{routefile_number}_{time_now_log}",
                 )
 
                 jobid = (

@@ -21,7 +21,7 @@ class BaseConfig:
     @property
     def target_dataset(self):
         raise NotImplementedError(
-            "Subclasses must implement the target_dataset property."
+            "Subclasses must implement the target_dataset property.",
         )
 
     @property
@@ -127,7 +127,7 @@ class BaseConfig:
             TargetDataset.CARLA_LEADERBOARD2_6CAMERAS: 6,
             TargetDataset.CARLA_LEADERBOARD2_3CAMERAS: 3,
             TargetDataset.CARLA_LEADERBOARD2_1CAMERA: 1,
-            TargetDataset.CARLA_PY123D_1CAMERA: 1,
+            TargetDataset.CARLA_PY123D_6CAMERAS: 6,
             TargetDataset.NAVSIM_4CAMERAS: 4,
             TargetDataset.WAYMO_E2E_2025_3CAMERAS: 3,
         }[self.target_dataset]
@@ -222,18 +222,66 @@ class BaseConfig:
                     "height": 512,
                     "cropped_height": 384,
                     "fov": 110,
-                }
+                },
             }
-        elif self.target_dataset == TargetDataset.CARLA_PY123D_1CAMERA:
+        elif self.target_dataset == TargetDataset.CARLA_PY123D_6CAMERAS:
+            # NOTE: Use six cameras inspired by nuScenes rig. In contract
+            # to the nuScenes resolution 1600x900, we use a downsampled 800x450 resolution
             return {
+                # CAM_FRONT
                 1: {
-                    "pos": [-1.5, 0.0, 2.0],
+                    "pos": [0.32, 0.0, 1.6],
                     "rot": [0.0, 0.0, 0.0],
-                    "width": 1024,
-                    "height": 512,
-                    "cropped_height": 512,
-                    "fov": 110,
-                }
+                    "width": 800,
+                    "height": 450,
+                    "cropped_height": 450,
+                    "fov": 65,
+                },
+                # CAM_FRONT_LEFT
+                2: {
+                    "pos": [0.15, -0.49, 1.6],
+                    "rot": [0.0, 0.0, -55.0],
+                    "width": 800,
+                    "height": 450,
+                    "cropped_height": 450,
+                    "fov": 65,
+                },
+                # CAM_BACK_LEFT
+                3: {
+                    "pos": [-0.35, -0.48, 1.6],
+                    "rot": [0.0, 0.0, -110.0],
+                    "width": 800,
+                    "height": 450,
+                    "cropped_height": 450,
+                    "fov": 65,
+                },
+                # CAM_FRONT_RIGHT
+                4: {
+                    "pos": [0.15, 0.49, 1.6],
+                    "rot": [0.0, 0.0, 55.0],
+                    "width": 800,
+                    "height": 450,
+                    "cropped_height": 450,
+                    "fov": 65,
+                },
+                # CAM_BACK_RIGHT
+                5: {
+                    "pos": [-0.35, 0.48, 1.6],
+                    "rot": [0.0, 0.0, 110.0],
+                    "width": 800,
+                    "height": 450,
+                    "cropped_height": 450,
+                    "fov": 65,
+                },
+                # CAM_BACK
+                6: {
+                    "pos": [-1.36, 0.0, 1.6],
+                    "rot": [0.0, 0.0, -180.0],
+                    "width": 800,
+                    "height": 450,
+                    "cropped_height": 450,
+                    "fov": 90,
+                },
             }
         elif self.target_dataset == TargetDataset.NAVSIM_4CAMERAS:
             return {
@@ -440,7 +488,10 @@ class BaseConfig:
         self._loaded_config = loaded_config
 
     def load_from_environment(
-        self, loaded_config, env_key: str, raise_error_on_missing_key: bool
+        self,
+        loaded_config,
+        env_key: str,
+        raise_error_on_missing_key: bool,
     ):
         # --- Parameters coming from environment variables, highest priority
         env_params = os.getenv(env_key, "").strip()
@@ -481,7 +532,7 @@ class BaseConfig:
 
         if name not in allowed and not name.startswith("_"):
             raise AttributeError(
-                f"Can't set unknown attribute '{name}'. Please check if this variable might have been renamed."
+                f"Can't set unknown attribute '{name}'. Please check if this variable might have been renamed.",
             )
         super().__setattr__(name, value)
 

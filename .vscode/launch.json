@@ -57,9 +57,17 @@
             "name": "Pretrain DDP",
             "type": "debugpy",
             "request": "launch",
-            "program": "lead/training/train.py",
+            "module": "torch.distributed.run",
             "console": "integratedTerminal",
             "justMyCode": false,
+            "subProcess": true,
+            "args": [
+                "--standalone",
+                "--nnodes=1",
+                "--nproc_per_node=4",
+                "--max_restarts=0",
+                "lead/training/train.py"
+            ],
             "env": {
                 "PYTHONDONTWRITEBYTECODE": "1",
                 "LEAD_TRAINING_CONFIG": "debug_mode=true logdir=outputs/local_training/pretrain",
@@ -74,9 +82,17 @@
             "name": "Posttrain DDP",
             "type": "debugpy",
             "request": "launch",
-            "program": "lead/training/train.py",
+            "module": "torch.distributed.run",
             "console": "integratedTerminal",
             "justMyCode": false,
+            "subProcess": true,
+            "args": [
+                "--standalone",
+                "--nnodes=1",
+                "--nproc_per_node=4",
+                "--max_restarts=0",
+                "lead/training/train.py"
+            ],
             "env": {
                 "PYTHONDONTWRITEBYTECODE": "1",
                 "LEAD_TRAINING_CONFIG": "debug_mode=true logdir=outputs/local_training/posttrain load_file=outputs/local_training/pretrain/model_0030.pth use_planning_decoder=true",
@@ -191,7 +207,7 @@
             "env": {
                 "PYTHONDONTWRITEBYTECODE": "1",
                 "LEAD_EXPERT_CONFIG": "debug_mode=true target_dataset=6 py123d_data_format=true use_radars=false lidar_stack_size=2 save_only_non_ground_lidar=false save_lidar_only_inside_bev=false",
-                "PY123D_DATA_ROOT": "${workspaceFolder}/outputs/expert_evaluation/py123d/"
+                "PY123D_DATA_ROOT": "${workspaceFolder}/data/carla_leaderboard2_py123d/"
             }
         },
         {

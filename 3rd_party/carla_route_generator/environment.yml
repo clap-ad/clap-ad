@@ -1,4 +1,4 @@
-name: lead
+name: carla_route_generator
 channels:
   - conda-forge
   - defaults
@@ -8,3 +8,5 @@ dependencies:
   - libpng
   - python=3.10.15
   - pip
+  - pip:
+    - -r requirements.txt

@@ -20,7 +20,7 @@ class TargetDataset(IntEnum):
     CARLA_LEADERBOARD2_1CAMERA = auto()
     NAVSIM_4CAMERAS = auto()
     WAYMO_E2E_2025_3CAMERAS = auto()
-    CARLA_PY123D_1CAMERA = auto()
+    CARLA_PY123D_6CAMERAS = auto()
 
 
 class SourceDataset(IntEnum):

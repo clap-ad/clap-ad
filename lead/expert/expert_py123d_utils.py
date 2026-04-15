@@ -9,8 +9,7 @@ import jaxtyping as jt
 import numpy as np
 import numpy.typing as npt
 from beartype import beartype
-from py123d.datatypes.detections.traffic_light_detections import TrafficLightStatus
-from py123d.datatypes.vehicle_state.ego_state_metadata import EgoStateSE3Metadata
+from py123d.datatypes import EgoStateSE3Metadata, TrafficLightStatus
 from py123d.geometry import (
     BoundingBoxSE3,
     EulerAngles,
@@ -19,14 +18,37 @@ from py123d.geometry import (
     Quaternion,
     Vector3D,
 )
-from py123d.geometry.transform.transform_se3 import (
+from py123d.geometry.transform import (
     translate_se3_along_body_frame,
     translate_se3_along_z,
 )
 from py123d.parser.utils.sensor_utils.camera_conventions import (
-    CameraConvention,
     convert_camera_convention,
 )
+
+
+@beartype
+def get_carla_lincoln_mkz_2020_metadata() -> EgoStateSE3Metadata:
+    """Helper function to get CARLA Lincoln MKZ 2020 ego metadata."""
+    # NOTE: These parameters are taken from the CARLA simulator vehicle model. The rear axles to center transform
+    # parameters are calculated based on parameters from the CARLA simulator.
+    return EgoStateSE3Metadata(
+        vehicle_name="carla_lincoln_mkz_2020",
+        width=1.83671,
+        length=4.89238,
+        height=1.49028,
+        wheel_base=2.86048,
+        center_to_imu_se3=PoseSE3(
+            x=1.64855,
+            y=0.0,
+            z=0.38579,
+            qw=1.0,
+            qx=0.0,
+            qy=0.0,
+            qz=0.0,
+        ),
+        rear_axle_to_imu_se3=PoseSE3.identity(),
+    )
 
 
 @beartype
@@ -220,7 +242,8 @@ def get_actor_velocity(actor: carla.Actor) -> Vector3D:
 
 @beartype
 def floor_center_to_rear_axle_translate(
-    pose: PoseSE3, ego_metadata: EgoStateSE3Metadata
+    pose: PoseSE3,
+    ego_metadata: EgoStateSE3Metadata,
 ) -> PoseSE3:
     """Translate pose from CARLA floor center to ISO 8855 rear axle frame.
 
@@ -262,7 +285,7 @@ def get_camera_extrinsic_as_iso(
     """
     # Create quaternion from rotation (pitch and yaw inverted for ISO 8855)
     quaternion = quaternion_from_carla_rotation(
-        carla.Rotation(roll=camera_rot[0], pitch=camera_rot[1], yaw=camera_rot[2])
+        carla.Rotation(roll=camera_rot[0], pitch=camera_rot[1], yaw=camera_rot[2]),
     )
 
     # Create extrinsic pose with inverted Y-axis
@@ -278,14 +301,15 @@ def get_camera_extrinsic_as_iso(
 
     # Convert from floor center to rear axle reference
     camera_extrinsic = floor_center_to_rear_axle_translate(
-        camera_extrinsic, ego_metadata
+        camera_extrinsic,
+        ego_metadata,
     )
 
     # Convert camera convention from pXpZmY (Unreal) to pZmYpX (ISO 8855/OpenCV)
     camera_extrinsic = convert_camera_convention(
         camera_extrinsic,
-        from_convention=CameraConvention.pXpZmY,
-        to_convention=CameraConvention.pZmYpX,
+        from_convention="pXpZmY",
+        to_convention="pZmYpX",
     )
 
     return camera_extrinsic
