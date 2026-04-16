@@ -7,10 +7,12 @@ import wandb
 from beartype import beartype
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
+from torch.cuda.amp import GradScaler
 
 from lead.tfv6.tfv6 import Prediction, TFv6
 from lead.training.config_training import TrainingConfig
 from lead.visualization.visualizer import visualize_sample
+from utils_base.remote_tracking import RemoteTracker
 
 LOG = logging.getLogger(__name__)
 
@@ -22,7 +24,7 @@ class Logger:
         config: TrainingConfig,
         model: TFv6 | torch.nn.parallel.distributed.DistributedDataParallel,
         optimizer: torch.optim.Optimizer,
-        scaler: torch.amp.GradScaler,
+        scaler: GradScaler,
         continue_step: int,
         dataset: Dataset,
         dataloader: DataLoader,
@@ -56,6 +58,8 @@ class Logger:
             self.tensorboard_writer = SummaryWriter(
                 log_dir=config.logdir,
             )
+            if self.config.log_clearml:
+                setup_clearml(self.config)
             if self.config.log_wandb:
                 wandb.init(
                     project=self.config.wandb_project_name,
@@ -126,7 +130,7 @@ class Logger:
                 predictions=predictions,
                 data=data,
                 save_image=True,
-                save_path=os.path.join("outputs", "training_viz"),
+                save_path=os.path.join(self.config.logdir, "training_viz"),
                 postfix=str(self.step).zfill(5),
                 prefix="train",
             )
@@ -239,3 +243,26 @@ class Logger:
                         value,
                         self.step,
                     )
+
+def setup_clearml(config):
+    import warnings
+    warnings.filterwarnings("ignore", category=DeprecationWarning) # For Clearml issues with newer versions of some libraries
+    # setup remote tracking
+    user_name = os.environ.get("USER_NAME", "default_user")
+    rt = RemoteTracker(
+        # tracking information part of the automated docker environment variables.
+        project_file = "/workspace/.project.conf",
+        do_clearml_tracking=True,
+        is_std_environment=True,
+    )
+    # start tracking
+    experiment_name = config.experiment_name
+    output_dir = f"/raid/{user_name}/output/"
+    if not os.path.exists(output_dir):
+        raise FileNotFoundError(f"Output directory {output_dir} does not exist. Please create it before starting the training.")
+    rt.start_trackers(
+        experiment_name=experiment_name,
+        flat_config=config.training_dict(),
+        output_path=f"/raid/{user_name}/output/Bench2Drive/check_connection",
+        session_config_path=config.logdir + "/config.json",
+    )
