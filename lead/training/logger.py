@@ -257,9 +257,6 @@ def setup_clearml(config):
     )
     # start tracking
     experiment_name = config.experiment_name
-    output_dir = f"/raid/{user_name}/output/"
-    if not os.path.exists(output_dir):
-        raise FileNotFoundError(f"Output directory {output_dir} does not exist. Please create it before starting the training.")
     rt.start_trackers(
         experiment_name=experiment_name,
         flat_config=config.training_dict(),
