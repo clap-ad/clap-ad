@@ -217,12 +217,17 @@ def bev_grid_sample(
 
     grid = torch.stack([u, v], dim=-1)  # (B, N, 2)
     grid = grid.view(B, N, 1, 2)  # (B, N, 1, 2)
-
+    orig_dtype = bev.dtype
+    bev = bev.float()
     sampled = F.grid_sample(
         bev, grid, mode="bilinear", align_corners=True
     )  # (B, D, N, 1)
 
-    return sampled.squeeze(-1).permute(0, 2, 1)  # (B, N, D)
+    sampled = sampled.squeeze(-1).permute(0, 2, 1)  # (B, N, D)
+    # Optionally cast back to original dtype
+    if sampled.dtype != orig_dtype:
+        sampled = sampled.to(orig_dtype)
+    return sampled
 
 
 def class2angle(
