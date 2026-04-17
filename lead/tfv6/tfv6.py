@@ -9,6 +9,7 @@ from beartype import beartype
 from torch import nn
 
 from lead.common.constants import SourceDataset
+from lead.tfv6.planning_head_clapad import PlanningHeadClap
 from lead.tfv6.bev_decoder import BEVDecoder
 from lead.tfv6.center_net_decoder import (
     CenterNetBoundingBoxPrediction,
@@ -99,7 +100,13 @@ class TFv6(nn.Module):
             )
 
         if self.config.use_planning_decoder:
-            if self.config.use_tfv5_planning_decoder:
+            if self.config.use_clapad_head:
+                self.planning_decoder = PlanningHeadClap(
+                    input_bev_channels=self.backbone.num_lidar_features,
+                    config=self.config,
+                    device=self.device,
+                ).to(self.device)
+            elif self.config.use_tfv5_planning_decoder:
                 self.planning_decoder = TFv5PlanningDecoder(
                     input_bev_channels=self.backbone.num_lidar_features,
                     config=self.config,
@@ -142,10 +149,10 @@ class TFv6(nn.Module):
                 pred_target_speed_scalar,
                 pred_headings,
             ) = self.planning_decoder(
-                bev_features,
-                planner_radar_features,
-                planner_radar_predictions,
-                data,
+                bev_embed=bev_features,
+                planner_radar_features=planner_radar_features,
+                planner_radar_predictions=planner_radar_predictions,
+                data=data,
                 log=self.log,
             )
 
