@@ -673,7 +673,16 @@ class TrainingConfig(BaseConfig):
     predict_temporal_spatial_waypoints = True
 
     # If true model will use the planning decoder.
-    use_planning_decoder = False
+    use_planning_decoder = True
+
+    # If true will use TFv5's planning decoder
+    use_tfv5_planning_decoder = False
+
+    # Use CLAP-AD head
+    use_clapad_head = True
+
+    # Used for TFv5 planning decoder
+    gru_hidden_size = 64
 
     @property
     def target_speed_classes(self):
