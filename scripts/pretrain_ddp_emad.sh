@@ -19,12 +19,12 @@ fi
 export MASTER_ADDR=127.0.0.1
 export MASTER_PORT=$((10000 + RANDOM % 50000))
 export PYTHONPATH=$PYTHONPATH:/workspace/lead:/workspace/lead/3rd_party/Bench2Drive/scenario_runner/srunner:/workspace/lead/3rd_party/CARLA_0915/PythonAPI:/workspace/lead/3rd_party/CARLA_0915/PythonAPI/carla:/workspace/lead/3rd_party/Bench2Drive:/workspace/lead/3rd_party/Bench2Drive/scenario_runner
-export PYTHON=/usr/bin/python3.10
+export PYTHON=/workspace/lead/.venv/bin/python
 export USER_NAME="eaghajanzadeh"
 
 echo "Using GPUs: $CUDA_VISIBLE_DEVICES for training"
 
-/usr/bin/python3.10 -m torch.distributed.run \
+uv run python -m torch.distributed.run \
     --standalone \
     --nnodes=1 \
     --nproc_per_node=$nproc_per_node \
