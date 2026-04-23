@@ -7,7 +7,6 @@ import wandb
 from beartype import beartype
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
-from torch.cuda.amp import GradScaler
 
 from lead.tfv6.tfv6 import Prediction, TFv6
 from lead.training.config_training import TrainingConfig
@@ -24,7 +23,7 @@ class Logger:
         config: TrainingConfig,
         model: TFv6 | torch.nn.parallel.distributed.DistributedDataParallel,
         optimizer: torch.optim.Optimizer,
-        scaler: GradScaler,
+        scaler: torch.amp.GradScaler,
         continue_step: int,
         dataset: Dataset,
         dataloader: DataLoader,

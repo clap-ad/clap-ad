@@ -12,7 +12,6 @@ import diskcache
 import numpy as np
 import torch
 import torch.multiprocessing as mp
-from torch.cuda.amp import GradScaler
 from beartype import beartype
 from diskcache import Cache
 from torch import optim
@@ -143,8 +142,6 @@ def initialize_model(
             device_ids=None,
             output_device=None,
             broadcast_buffers=False,
-            bucket_cap_mb=config.bucket_cap_mb,
-            gradient_as_bucket_view=config.gradient_as_bucket_view,
         )
     else:
         model_wrapper = model
@@ -168,7 +165,7 @@ def initialize_optimizer(
 ) -> tuple[
     ZeroRedundancyOptimizer | torch.optim.AdamW,
     CosineAnnealingWarmRestarts | LambdaLR | CosineAnnealingLR,
-    GradScaler,
+    torch.amp.GradScaler,
     int,
 ]:
     params = model_wrapper.parameters()
@@ -187,7 +184,7 @@ def initialize_optimizer(
             lr=config.lr,
             amsgrad=True,
             weight_decay=config.weight_decay,
-            fused=False,
+            fused=True,
         )
 
     if config.use_cosine_annealing_with_restarts:
@@ -217,7 +214,7 @@ def initialize_optimizer(
             )
         )
 
-    scaler = GradScaler(
+    scaler = torch.amp.GradScaler(
         init_scale=config.grad_scaler_init_scale,
         growth_factor=config.grad_scaler_growth_factor,
         backoff_factor=config.grad_scaler_backoff_factor,
