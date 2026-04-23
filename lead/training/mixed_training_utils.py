@@ -253,6 +253,11 @@ def mixed_data_collate_fn(batch):
                     except:
                         v = None
             new_vals.append(v)
+        # Handle scene_score_info dicts explicitly
+        if isinstance(ref, dict):
+            if key == "scene_score_info":
+                collated[key] = new_vals
+                continue
         try:
             collated[key] = torch.utils.data._utils.collate.default_collate(new_vals)
         except:

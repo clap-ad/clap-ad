@@ -50,7 +50,7 @@ class HydraSpeedHead(nn.Module):
         if self.flags_shapes_dict is None:
             self.flags_shapes_dict = {'ttc': 0, 'tl': 0, 'st': 0}
 
-        self.agent_fuser = AgentFuser(embed_dims=self.embed_dims, fuser_dim=fuser_dim)
+        # self.agent_fuser = AgentFuser(embed_dims=self.embed_dims, fuser_dim=fuser_dim)
         self.agent_encoder = nn.Sequential(
             nn.Linear(self.embed_dims, self.embed_dims),
             nn.LayerNorm(self.embed_dims),
@@ -170,49 +170,167 @@ class HydraSpeedHead(nn.Module):
             raise ValueError(f"Unknown score_type: {score_type}")
 
 
-    def forward(self, track_query, traj_query, speed, path_pred, tf_track_query, st_track_query, traj_scores=None, flags=None):
-        # detach everything but MotionFormer output
+    def forward(self, plan_query, path_pred, radar_feat=None):
         path_pred = path_pred.detach()
-        flag_dict = {}
-        if flags is not None:
-            flag_dict["ttc"] = flags.get("ttc", None)
-            flag_dict["tl"] = flags.get("traffic_light", None)
-            flag_dict["st"] = flags.get("stop_sign", None)
-
-
-        if track_query is not None:
-            track_query = track_query.detach()
         
-        # Keep gradients to traffic lights
-        # if obj_track_query is not None:
-        #     obj_track_query = obj_track_query.detach()
-        if traj_scores is None:
-            traj_scores = torch.zeros_like(traj_query[..., 0])
-        if traj_query.dim() == 5:  # If there is multi-level trajectory query, take the last decoder layer's queries
-            # [L, B, N, P, C], [3, 1, N, 6, 256]
-            traj_query = traj_query[-1]  # Take the last level only [B, N, P, C]
-            traj_scores = traj_scores[-1] 
+        speed_logits_ttc, path_pred_augmented = self._forward_time_to_collision_tfv6(plan_query, path_pred)  # [B, NUM_PATHS, MODES=1, S]
+        speed_logits_tl = self._forward_traffic_light_tfv6(plan_query, path_pred)  # [B, NUM_PATHS=1, MODES=1, S]
 
-        if self.combined_attention:
-            # legacy branch
-            # Flags and multi context encoder is not supported
-            assert flags is None and not self.common_context_encoder
-            speed_logits, path_pred_augmented = self._forward_combined(track_query, traj_query, traj_scores, tf_track_query, path_pred, speed=speed, flags=None)  # [B, NUM_PATHS, 2, S]
-        else:
-            assert speed is None
-            speed_logits_ttc, path_pred_augmented = self._forward_time_to_collision(track_query, traj_query, traj_scores, path_pred, speed=None, flags=flag_dict.get('ttc', None))  # [B, NUM_PATHS, MODES=1, S]
-            speed_logits_tl = self._forward_traffic_light(tf_track_query, path_pred, flags=flag_dict.get('tl', None))  # [B, NUM_PATHS=1, MODES=1, S]
+        NUM_PATHS = speed_logits_ttc.shape[1]
+        speed_logits = torch.cat([speed_logits_ttc, speed_logits_tl.expand(-1, NUM_PATHS, -1, -1)], dim=2)  # [B, NUM_PATHS, 2, S]
 
-            NUM_PATHS = speed_logits_ttc.shape[1]
-            speed_logits = torch.cat([speed_logits_ttc, speed_logits_tl.expand(-1, NUM_PATHS, -1, -1)], dim=2)  # [B, NUM_PATHS, 2, S]
-
-            if self.num_modes == 3:
-                speed_logits_st = self._forward_stop_sign(st_track_query, path_pred, flags=flag_dict.get('st', None))  # [B, NUM_PATHS=1, MODES=1, S]
-                speed_logits = torch.cat([speed_logits, speed_logits_st.expand(-1, NUM_PATHS, -1, -1)], dim=2)  # [B, NUM_PATHS, 3, S]
+        if self.num_modes == 3:
+            speed_logits_st = self._forward_stop_sign_tfv6(plan_query, path_pred)  # [B, NUM_PATHS=1, MODES=1, S]
+            speed_logits = torch.cat([speed_logits, speed_logits_st.expand(-1, NUM_PATHS, -1, -1)], dim=2)  # [B, NUM_PATHS, 3, S]
 
             
         return speed_logits, path_pred_augmented
+
     
+    def _forward_time_to_collision_tfv6(self, plan_query, path_pred):
+        """
+        Speed prediction forward pass.
+        Accepts agent queries and context inputs for ttc score.
+
+        Args:
+            plan_query (torch.Tensor): Plan_query output (B, HW, C) C is the embed dim
+            path_pred (torch.Tensor): Path output offsets [B, 2 * planning_steps]
+        Note:
+            In encoding part, basically we view each pixel as an object with its own features.
+            Previously in self.static_encoder(plan_query) it was [B, Ns, C],
+            but now it is [B, HW, C].
+        Returns:
+            torch.Tensor: Speed logits [B, NUM_PATHS, 1, S].
+        """
+        # NOTE: Do not call directly because detaching is handled in forward()
+        attn_input = []
+
+        if self.path_aug_cnt is not None:  # If we want to aug the predicted path
+            path_pred = lateral_shift_paths(path_pred)  # [B, Aug_cnt, T, 2]
+            context_token_per_path = []
+            for i in range(self.path_aug_cnt):
+                # context_token = self.context_encoder(path_pred[:, i], speed, flags)  # [B, C]
+                context_token = self.get_context_token('ttc', path_pred[:, i])  # [B, C]
+                context_token_per_path.append(context_token.unsqueeze(1))
+            context_token = torch.cat(context_token_per_path, dim=1)  # [B, Aug_cnt, C]
+        else:
+            # context_token = self.context_encoder(path_pred, speed, flags).unsqueeze(1)  # [B, 1, C]
+            context_token = self.get_context_token('ttc', path_pred).unsqueeze(1)  # [B, 1, C]
+
+        B, NUM_PATHS = context_token.shape[0], context_token.shape[1]
+        fused_feat = plan_query  # [B, HW, C]
+        agent_tokens = self.agent_encoder(fused_feat)  # [B, HW, C]
+
+        # Append agent tokens for attention input
+        attn_input.append(agent_tokens)
+
+        # only use ttc queries
+        speed_queries = self.ttc_queries  # [1, S, C]
+        _, S, C = speed_queries.shape
+
+        if NUM_PATHS > 1:
+            # reshape attention input so we can process all paths in parallel
+            if len(attn_input) > 0:
+                attn_input = torch.cat(attn_input, dim=1)
+                attn_input = attn_input.unsqueeze(1).expand(-1, NUM_PATHS, -1, -1)  # [B, NUM_PATHS, N, C]
+                context_tokens = context_token.unsqueeze(2)  # [B, NUM_PATHS, 1, C]
+                attn_input = torch.cat([attn_input, context_tokens], dim=2)  # [B, NUM_PATHS, N+1, C]
+            else:
+                attn_input = context_token.unsqueeze(2)  # [B, NUM_PATHS, 1, C]
+            attn_input = attn_input.reshape(B * NUM_PATHS, -1, C)  # [B*NUM_PATHS, N+1, C]
+            speed_queries = speed_queries.expand(B * NUM_PATHS, -1, -1)  # [B*NUM_PATHS, S, C]
+            speed_tokens, _ = self.ttc_attn(speed_queries, attn_input, attn_input)  # [B*NUM_PATHS, S, C]
+            speed_logits = self.get_scores_from_query('ttc', speed_tokens)  # [B*NUM_PATHS, S, 1]
+            speed_logits = speed_logits.reshape(B, NUM_PATHS, S, 1)  # [B, NUM_PATHS, S, 1]
+        else:
+            if context_token is not None:
+                attn_input.append(context_token)
+            attn_input = torch.cat(attn_input, dim=1)  # [B, N+1, C]
+            speed_queries = speed_queries.expand(B, -1, -1)  # [B, S, C]
+            speed_tokens, _ = self.ttc_attn(speed_queries, attn_input, attn_input)  # [B, S, C]
+            speed_logits = self.get_scores_from_query('ttc', speed_tokens)  # [B, S, 1]
+
+        return speed_logits.reshape(B, NUM_PATHS, 1, S), path_pred  # [B, NUM_PATHS, MODES=1, S]
+    
+
+    def _forward_traffic_light_tfv6(self, plan_query, path_pred):
+        """
+        Speed prediction forward pass.
+        Accepts traffic light queries and context inputs for tl score.
+
+        Args:
+            plan_query (torch.Tensor): Plan query output (B, HW, C) 
+            path_pred (torch.Tensor): Path output offsets [B, 2 * planning_steps]
+        Note:
+            In encoding part, basically we view each pixel as an object with its own features.
+            Previously in self.static_encoder(plan_query) it was [B, Ns, C],
+            but now it is [B, HW, C].
+        Returns:
+            torch.Tensor: Speed logits [B, 1, 1, S].
+        """
+        # NOTE: Do not call directly because detaching is handled in forward()
+        B = path_pred.shape[0]
+        attn_input = []
+
+        context_token = self.get_context_token('tl', path_pred).unsqueeze(1)  # [B, 1, C]
+        attn_input.append(context_token)
+
+        # object path (traffic light score)
+        B, Ns, C = plan_query.shape
+        obj_tokens = self.static_encoder(plan_query)  # [B, Ns, C]
+        attn_input.append(obj_tokens)
+        
+        # only use tl queries
+        speed_queries = self.tl_queries # [1, S, C]
+        _, S, C = speed_queries.shape
+
+        attn_input = torch.cat(attn_input, dim=1)  # [B, Ns+1, C]
+        speed_queries = speed_queries.expand(B, -1, -1)  # [B, S, C]
+        speed_tokens, _ = self.tl_attn(speed_queries, attn_input, attn_input)  # [B, S, C]
+        speed_logits = self.get_scores_from_query('tl', speed_tokens)  # [B, S, 1]
+
+        return speed_logits.reshape(B, 1, 1, S)  # [B, NUM_PATHS=1, MODES=1, S]
+        
+        
+    def _forward_stop_sign_tfv6(self, plan_query, path_pred):
+        """
+        Speed prediction forward pass.
+        Accepts stop sign and context inputs for stop sign score.
+
+        Args:
+            plan_query (torch.Tensor): Plan query output (B, HW, C)
+            path_pred (torch.Tensor): Path output offsets [B, 2 * planning_steps]
+        Note:
+            In encoding part, basically we view each pixel as an object with its own features.
+            Previously in self.static_encoder(plan_query) it was [B, Ns, C],
+            but now it is [B, HW, C].
+        Returns:
+            torch.Tensor: Speed logits [B, 1, 1, S].
+        """
+        # NOTE: Do not call directly because detaching is handled in forward()
+        B = path_pred.shape[0]
+        attn_input = []
+
+        context_token = self.get_context_token('st', path_pred).unsqueeze(1)  # [B, 1, C]
+        attn_input.append(context_token)
+
+        # object path (stop sign score)
+        B, Ns, C = plan_query.shape
+        obj_tokens = self.static_encoder(plan_query)  # [B, Ns, C]
+        attn_input.append(obj_tokens)
+        
+        # only use st queries
+        speed_queries = self.st_queries # [1, S, C]
+        _, S, C = speed_queries.shape
+
+        attn_input = torch.cat(attn_input, dim=1)  # [B, Ns+1, C]
+        speed_queries = speed_queries.expand(B, -1, -1)  # [B, S, C]
+        speed_tokens, _ = self.st_attn(speed_queries, attn_input, attn_input)  # [B, S, C]
+        speed_logits = self.get_scores_from_query('st', speed_tokens)  # [B, S, 1]
+
+        return speed_logits.reshape(B, 1, 1, S)  # [B, NUM_PATHS=1, MODES=1, S]
+        
+
     def _forward_time_to_collision(self, track_query, traj_query, traj_scores, path_pred, speed=None, flags=None):
         """
         Speed prediction forward pass.

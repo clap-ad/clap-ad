@@ -213,7 +213,8 @@ class TrainingConfig(BaseConfig):
         return tmp_folder
 
     # Root directory for CARLA sensor data.
-    carla_root = "/workspace/lead/data/carla_leaderboard2"
+    # carla_root = "/workspace/lead/data/carla_leaderboard2"
+    carla_root = "/data/datasets/AD_datasets/lead_carla/data/carla_leaderboard2"
 
     @property
     def carla_data(self):
@@ -707,9 +708,11 @@ class TrainingConfig(BaseConfig):
     # Number of route points we use for smoothing.
     num_route_points_smoothing = 20
     # Number of route checkpoints to predict. Needs to be smaller than num_route_points_smoothing!
-    num_route_points_prediction = 10
+    # num_route_points_prediction = 10
+    num_route_points_prediction = 12
     # Assume maximum distance between two future waypoints in meters.
     max_distance_future_waypoint = 10.0
+    target_first_distance = 1.0 #. 1 meters between waypoints
 
     @property
     def num_way_points_prediction(self):
@@ -988,6 +991,14 @@ class TrainingConfig(BaseConfig):
             weights["loss_spatio_temporal_waypoints"] = 0.0
             weights["loss_spatial_route"] = 0.0
             weights["loss_target_speed"] = 0.0
+
+        if self.use_clapad_head:
+            weights["loss_speed_scores"] = 0.2
+            weights["TTC_Score"] = 0.0
+            weights["traffic_light"] = 0.0
+            weights["stop_sign"] = 0.0
+            
+
 
         return weights
 

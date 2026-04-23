@@ -31,6 +31,8 @@ from lead.data_loader.carla_dataset_utils import (
 )
 from lead.data_loader.training_cache import CacheKey, PersistentCache, SensorData
 from lead.training.config_training import TrainingConfig
+from lead.data_loader.carla_dataset_utils import bb_image_to_vehicle_system # For scene score info
+import matplotlib.pyplot as plt # For plotting bbox in scene_score info
 
 LOG = logging.getLogger(__name__)
 
@@ -409,9 +411,7 @@ class CARLAData(Dataset):
             )
             if self.config.smooth_route:
                 route = carla_dataset_utils.smooth_path(
-                    self.config,
-                    route,
-                    target_first_distance=2.5,
+                    self.config, route, target_first_distance=self.config.target_first_distance
                 )
 
             # Meta data for route
@@ -710,8 +710,123 @@ class CARLAData(Dataset):
                     interpolation=cv2.INTER_NEAREST,
                 )
 
+        if self.config.use_clapad_head:
+            scene_score_info = self.get_scene_score_info(data=data)
+            data["scene_score_info"] = scene_score_info
         return data
 
+    def get_scene_score_info(self, data):
+        """
+        Get scene score information for the current index.
+        It extract the following:
+            - actors: [
+                        {
+                            'p_o_x': float,
+                            'p_o_y': float,
+                            'p_o_x_fut': float, query ttc_time in future
+                            'p_o_y_fut': float,
+                        },
+                    ]
+            - traffic_rules: [
+                        {
+                            'type': str, Either of speed_limit, stop_sign, traffic_light
+                            'value': int, speed_limit value (for speed_limit only)
+                            'state': str, either of red, green, yellow (for traffic light only)
+                            'distance': float, distance from ego to the traffic rule
+                        },
+                        ...
+                    ]
+        """
+        # ------ Third
+        # Those who should be regarded in TTC calculations
+        debug = False
+        if debug:
+            debugging_frames = [
+                "HazardAtSideLaneTwoWaysTown13_Rep0_1552_1_route0_01_10_05_22_170078",
+                "AccidentTwoWaysTown12_Rep0_route_000021_route0_01_09_04_19_190113",
+                "VehicleTurningRoutePedestrianTown12_Rep0_3869_0_route0_01_10_02_42_210372"
+            ]
+            frame_name = data["scenario_type"]+data["route_number"]+data["frame_number"]
+            if frame_name in debugging_frames:
+                print(frame_name)
+
+        rel_boxes = get_rel_bbox(
+            data = data,
+            min_x_meter = self.config.min_x_meter,
+            max_x_meter = self.config.max_x_meter,
+            pixels_per_meter = self.config.pixels_per_meter
+        )
+        self.ttc_time_horizon = 1.0 # in seconds
+        class_names = [
+            'VEHICLE', 'WALKER', 'TRAFFIC_LIGHT', 'STOP_SIGN',
+            'SPECIAL', 'OBSTACLE', 'PARKING', 'BIKER'
+        ]
+        ttc_dynamic_obj = [
+            'VEHICLE', 'WALKER', 'BIKER'
+        ]
+        tf_light_obj = 'TRAFFIC_LIGHT'
+        stop_sign_obj = 'STOP_SIGN'
+        # objects
+        obj_list = []
+        # Traffic Rules
+        tf_list = []
+        for box in rel_boxes:
+            x, y, w, h, yaw, vx, vy, cls = box
+            obj_name = class_names[int(cls)]
+            if obj_name == tf_light_obj:
+                # convert to ego frame (same transform you used before)
+                long_dist = x     # forward
+                lat_dist = y      # left
+                dist = np.linalg.norm([x, y])
+                entry = {
+                    "type": obj_name,
+                    "dist_to_trig": dist,
+                    # "affects_ego": tf_rule["affects_ego"],
+                    # "id": tf_rule["id"],
+                    "long_dist": long_dist,
+                    "lat_dist": lat_dist
+                }
+                tf_list.append(entry)
+            elif obj_name == stop_sign_obj:
+                long_dist = x     # forward
+                lat_dist = y      # left
+                dist = np.linalg.norm([x, y])
+                entry = {
+                    "type": obj_name,
+                    "dist_to_trig": dist,
+                    # "affects_ego": tf_rule["affects_ego"],
+                    # "id": tf_rule["id"],
+                    "long_dist": long_dist,
+                    "lat_dist": lat_dist
+                }
+                tf_list.append(entry)
+            else:
+                # current position (already ego-relative)
+                p_now = np.array([x, y])
+                # future position (constant velocity)
+                p_fut = p_now + np.array([vx, vy]) * self.ttc_time_horizon
+                obj_dict = {
+                    "type": obj_name,
+                    "p_o_x": x,
+                    "p_o_y": y,
+                    "p_o_x_fut": p_fut[0],
+                    "p_o_y_fut": p_fut[1],
+                    "vx": vx,
+                    "vy": vy,
+                    "yaw": yaw,
+                    "bbox": [w, h],
+                    "ttc_cal": obj_name in ttc_dynamic_obj
+                }
+                obj_list.append(obj_dict)
+                
+        scene_dict = {
+            'actors': obj_list,
+            'traffic_rules': tf_list
+        }
+        if debug:
+            vis_ttc_debug_full(data, scene_dict, save_path=data["scenario_type"]+data["route_number"]+data["frame_number"]+".png")
+        return scene_dict      
+    
     @beartype
     def _load_sensor_data(
         self,
@@ -1171,3 +1286,216 @@ class CARLAData(Dataset):
 
     def __len__(self):
         return self.lidars.shape[0]
+
+def vis_rel_bbox(data, rel_boxes, save_path):
+    ego_extent_x=2.5   # meters (half-length or full? match your config)
+    ego_extent_y=1.0   # meters
+    class_names = [
+        'VEHICLE', 'WALKER', 'TRAFFIC_LIGHT', 'STOP_SIGN',
+        'SPECIAL', 'OBSTACLE', 'PARKING', 'BIKER'
+    ]
+    def to_plot_frame(x, y):
+        # forward = up
+        return -y, x
+
+    fig, axs = plt.subplots(1, 3, figsize=(18, 6))
+
+    # ======================
+    # 🟩 BEV
+    # ======================
+    bev = data["bev_semantic"]
+    bev_rot = np.rot90(bev, k=1)
+    axs[0].imshow( bev_rot, cmap="gray")
+    axs[0].set_title("BEV (forward = up)")
+    axs[0].axis("off")
+
+    # ======================
+    # 📦 Ego-relative boxes
+    # ======================
+    ax = axs[1]
+    ax.set_title("Ego Frame")
+    ax.set_xlabel("Left")
+    ax.set_ylabel("Forward")
+    ax.grid(True)
+    ax.axis('equal')
+
+    # Ego box
+    ego_corners = np.array([
+        [-ego_extent_x/2, -ego_extent_y/2],
+        [ ego_extent_x/2, -ego_extent_y/2],
+        [ ego_extent_x/2,  ego_extent_y/2],
+        [-ego_extent_x/2,  ego_extent_y/2],
+        [-ego_extent_x/2, -ego_extent_y/2]
+    ])
+    ego_plot = np.array([to_plot_frame(x, y) for x, y in ego_corners])
+    ax.plot(ego_plot[:, 0], ego_plot[:, 1], 'r-', linewidth=2)
+
+    for box in rel_boxes:
+        x, y, w, h, yaw, vx, vy, box_cls = box
+
+        # ✅ correct yaw after frame rotation
+        yaw_plot = yaw + np.pi / 2
+
+        corners = np.array([
+            [-h/2, -w/2],
+            [ h/2, -w/2],
+            [ h/2,  w/2],
+            [-h/2,  w/2],
+            [-h/2, -w/2]
+        ])
+
+        c, s = np.cos(yaw_plot), np.sin(yaw_plot)
+        rot = np.array([[c, -s], [s, c]])
+        pts = corners @ rot.T + np.array([x, y])
+
+        pts_plot = np.array([to_plot_frame(px, py) for px, py in pts])
+        ax.plot(pts_plot[:, 0], pts_plot[:, 1], 'b-')
+        ax.text(
+            pts_plot[0, 0], pts_plot[0, 1], class_names[box_cls],
+            color='black',
+            fontsize=5,
+            bbox=dict(facecolor='white', edgecolor='none', alpha=0.3, boxstyle='round')
+        )
+
+
+    # ======================
+    # 📷 RGB
+    # ======================
+    rgb = data["rgb"]
+    rgb_img = np.transpose(rgb, (1, 2, 0))
+    axs[2].imshow(rgb_img)
+    axs[2].set_title("RGB")
+    axs[2].axis("off")
+
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.show()
+    plt.close(fig)
+
+def get_rel_bbox(data, min_x_meter, max_x_meter, pixels_per_meter):
+    boxes = data["center_net_bounding_boxes"]
+    bev_shape = data["rasterized_lidar"].shape # [1, 320, 384]
+    bev_shape = bev_shape[1:]
+    H, W = bev_shape[:2]
+    # ego pixel location (same as your code)
+    ego_px = int(W * (-min_x_meter / (max_x_meter - min_x_meter)))
+    ego_py = int(H / 2)
+    rel_boxes = []
+    for box in boxes:
+        cx, cy, w, h, yaw, speed = box[:6]
+
+        if cx==0 and cy==0 and w==0 and h==0:
+            continue
+
+        class_col = 7  # Replace with TransfuserBoundingBoxIndex.CLASS if imported
+        box_cls = box[class_col].astype(int)
+
+
+        # --- position: pixel -> ego-centered meters ---
+        dx = (cx - ego_px) / pixels_per_meter
+        dy = (cy - ego_py) / pixels_per_meter
+
+        # BEV usually: x forward, y left (check sign if needed)
+        x_rel = dx
+        y_rel = -dy
+        yaw = -yaw
+
+        # --- velocity ---
+        # if len(box) >= 7:
+        #     vx, vy = box[5], box[6]
+        # else:
+        #     # only speed → assume along heading
+        #     speed = box[5]
+        #     vx = speed * np.cos(yaw)
+        #     vy = speed * np.sin(yaw)
+
+        speed = box[5]
+        vx = speed * np.cos(yaw)
+        vy = speed * np.sin(yaw)
+
+        rel_boxes.append([
+            x_rel, y_rel,
+            w / pixels_per_meter,
+            h / pixels_per_meter,
+            yaw,
+            vx, vy,
+            box_cls
+        ])
+    return rel_boxes
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+def vis_ttc_debug_full(data, scene_dict, save_path="ttc_debug_full.png"):
+    fig, axs = plt.subplots(1, 3, figsize=(18, 6))
+
+    def to_plot_frame(x, y):
+        return -y, x  # forward = up
+
+    # ======================
+    # 🟩 BEV
+    # ======================
+    bev = data["bev_semantic"]
+    bev_rot = np.rot90(bev, k=1)
+
+    axs[0].imshow(bev_rot, cmap="gray")
+    axs[0].set_title("BEV (forward = up)")
+    axs[0].axis("off")
+
+    # ======================
+    # 📦 TTC DEBUG
+    # ======================
+    ax = axs[1]
+    ax.set_title("TTC (Current vs Future)")
+    ax.set_xlabel("Left")
+    ax.set_ylabel("Forward")
+    ax.grid(True)
+    ax.axis("equal")
+
+    # Ego
+    ax.scatter(0, 0, c='red', s=100, marker='x', label='Ego')
+
+    for obj in scene_dict["actors"]:
+        x, y = obj["p_o_x"], obj["p_o_y"]
+        xf, yf = obj["p_o_x_fut"], obj["p_o_y_fut"]
+        obj_type = obj["type"]
+
+        px, py = to_plot_frame(x, y)
+        pxf, pyf = to_plot_frame(xf, yf)
+
+        # current
+        ax.scatter(px, py, c='blue', s=40)
+
+        # future
+        ax.scatter(pxf, pyf, c='green', s=40)
+
+        # motion arrow
+        ax.arrow(px, py, pxf - px, pyf - py,
+                 head_width=0.3, length_includes_head=True,
+                 color='gray', alpha=0.7)
+
+        ax.text(px, py, obj_type, fontsize=6)
+
+    # traffic rules
+    for tf in scene_dict["traffic_rules"]:
+        x, y = tf["long_dist"], tf["lat_dist"]
+        px, py = to_plot_frame(x, y)
+
+        axs[1].scatter(px, py, c='orange', s=60, marker='s')
+        axs[1].text(px, py, tf["type"], fontsize=6)
+
+    # ======================
+    # 📷 RGB
+    # ======================
+    rgb = data["rgb"]
+    rgb_img = np.transpose(rgb, (1, 2, 0))
+
+    axs[2].imshow(rgb_img)
+    axs[2].set_title("RGB")
+    axs[2].axis("off")
+
+    # ======================
+    plt.tight_layout()
+    plt.savefig("/workspace/temp_vis/" + save_path)
+    plt.show()
+    plt.close(fig)

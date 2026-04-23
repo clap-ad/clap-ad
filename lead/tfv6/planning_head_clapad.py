@@ -1,5 +1,8 @@
 
 
+from lead.tfv6.speed_score_utils import compute_stop_sign_adherence, compute_traffic_light_adherence, compute_ttc
+from lead.tfv6.planning_decoder import PositionEmbeddingSine
+from lead.tfv6.hydra_speed_head import HydraSpeedHead
 import torch
 import torch.nn as nn
 import numpy as np
@@ -10,28 +13,7 @@ import torch.nn as nn
 class PlanningHeadClap(nn.Module):
     def __init__(
             self,
-            bev_h=200,
-            bev_w=200,
-            embed_dims=256,
-            planning_steps=6,
-            command_dim=3,
-            loss_planning=None,
-            loss_collision=None,
-            loss_speed=None,
-            loss_steering=None,
-            loss_accel=None,
-            planning_eval=False,
-            use_col_optim=False,
-            col_optim_args=dict(
-                occ_filter_range=5.0,
-                sigma=1.0, 
-                alpha_collision=5.0,
-            ),
-            with_adapter=False,
-            predict_control=False,
-            control_classification=False,
             use_local_tp=True,
-            use_bev=False,
             num_speed_bins=7,
             num_modes=2,
             path_aug_cnt=5,
@@ -44,7 +26,7 @@ class PlanningHeadClap(nn.Module):
             # 2 for HipAD (1x detection & motion, 1x navigation)
             common_score_mlp=True,
             use_gru=True,
-            old_config=True, # old is until VAD-v4
+            config=None,
             **kwargs
         ):
         """
@@ -62,37 +44,59 @@ class PlanningHeadClap(nn.Module):
         super(PlanningHeadClap, self).__init__()
         self.use_can_bus = True
         self.speed_combined_attention = speed_combined_attention
-
-        # Nuscenes
-        self.bev_h = bev_h
-        self.bev_w = bev_w
+        # For TFv6
+        self.config = config
+        embed_dims = self.config.transfuser_token_dim
+        self.target_points_normalization_constants = torch.tensor(
+            self.config.target_points_normalization_constants,
+            dtype=self.config.torch_float_type,
+        )
+        self.tp_encoder = nn.Linear(2, config.transfuser_token_dim)
+        
+        self.num_navi_info = 1 # Number of different embeddings representing future navigation info
+        command_dim = self.config.discrete_command_dim
         self.navi_embed = nn.Embedding(command_dim, embed_dims)
-        
-        # Multi-head outputs: path (GRU), speed (hydra), steering (Beta), acceleration (Beta)
-        self.predict_control = predict_control
-        self.control_classification = control_classification
-        
-        self.use_bev = use_bev
-        
-        self.old_config = old_config
-        # + 1 for the target speed token
-        self.use_local_tp = use_local_tp
-        self.use_gru = use_gru
 
-        mlp_input_size = embed_dims
-        if self.use_local_tp:
-            self.target_point_fc = nn.Sequential(
-                nn.Linear(2, 8),
-                nn.ReLU(),
-                nn.Linear(8, 16),
+        if self.config.use_tp:
+            self.num_navi_info += 1
+            self.tp_encoder = nn.Linear(2, config.transfuser_token_dim)
+
+        if self.config.use_previous_tp:
+            self.num_navi_info += 1
+
+        if self.config.use_next_tp:
+            self.num_navi_info += 1
+        
+        self.dimension_adapter = nn.Conv2d(
+            512, self.config.transfuser_token_dim, kernel_size=1
+        )
+        self.cosine_pos_embeding = PositionEmbeddingSine(
+            config, self.config.transfuser_token_dim // 2, normalize=True
+        )
+        self.planning_steps = 12 # since we predict 12 waypoints in future
+        self.path_query = nn.Parameter(
+            torch.zeros(
+                1,
+                self.planning_steps,
+                self.config.transfuser_token_dim,
             )
-            mlp_input_size += 16 # for target point
+        )
+        self.transformer_decoder = torch.nn.TransformerDecoder(
+            decoder_layer=nn.TransformerDecoderLayer(
+                self.config.transfuser_token_dim,
+                self.config.transfuser_num_bev_cross_attention_heads,
+                activation=nn.GELU(),
+                batch_first=True,
+            ),
+            num_layers=self.config.transfuser_num_bev_cross_attention_layers,
+            norm=nn.LayerNorm(self.config.transfuser_token_dim),
+        )
         self.path_fc = nn.Sequential(
-            nn.Linear(mlp_input_size, mlp_input_size * 2),
+            nn.Linear(embed_dims, embed_dims * 2),
             nn.ReLU(),
-            nn.Linear(mlp_input_size * 2, mlp_input_size),
+            nn.Linear(embed_dims * 2, embed_dims),
             nn.ReLU(),
-            nn.Linear(mlp_input_size, planning_steps * 2),
+            nn.Linear(embed_dims, 2),
         )
         
         assert num_modes > 1
@@ -100,39 +104,48 @@ class PlanningHeadClap(nn.Module):
         # speed_fuser_dim = fuser_dim - 1 # In speed, navigation does not get fused
         speed_fuser_dim = fuser_dim # Needed for HipAD
         self.path_aug_cnt = path_aug_cnt
-        # self.speed_branch = HydraSpeedHead(embed_dims=embed_dims, num_speed_bins=num_speed_bins, num_modes=3, planning_steps=planning_steps, path_aug_cnt=path_aug_cnt, combined_attention=speed_combined_attention, common_context_encoder=common_context_encoder, flags_shapes_dict=flags_shapes_dict, fuser_dim=speed_fuser_dim, common_score_mlp=common_score_mlp)
+        speed_combined_attention = False
+        common_context_encoder = False
+        common_score_mlp = True
+        self.speed_branch = HydraSpeedHead(
+            embed_dims=embed_dims,
+            num_speed_bins=num_speed_bins, 
+            num_modes=3, 
+            planning_steps=self.planning_steps, 
+            path_aug_cnt=path_aug_cnt, 
+            combined_attention=speed_combined_attention, 
+            common_context_encoder=common_context_encoder, 
+            flags_shapes_dict=flags_shapes_dict, 
+            fuser_dim=speed_fuser_dim, 
+            common_score_mlp=common_score_mlp
+        )
         # For compatibility with previous versions
         self.use_speed_wp = False
         self.speed_is_regression = False
         self.speed_is_hurdle = False
         self.speed_is_scores = True
-        
-        # Placeholder for path_branch (backward compatibility)
-        self.path_branch = None
-        
-        # self.loss_planning = build_loss(loss_planning)
-        # self.loss_speed = build_loss(loss_speed) if loss_speed is not None else None
-        # self.loss_steering = build_loss(loss_steering) if loss_steering is not None else None
-        # self.loss_accel = build_loss(loss_accel) if loss_accel is not None else None
-        self.planning_steps = planning_steps
-        self.planning_eval = planning_eval
-        
 
-        self.mlp_fuser = nn.Sequential(
-            nn.Linear(embed_dims * fuser_dim, embed_dims),
-            nn.LayerNorm(embed_dims),
-            nn.ReLU(inplace=True),
+        # Loss funcations
+        speed_bins=[0, 2.5, 5, 7, 8.5, 10, 12] # speed bins for the speed head
+        ttc_time_horizon = 1.0 # in seconds
+        self.loss_speed = SpeedScoringLoss(
+            speed_bins=speed_bins,
+            crt_cfg_dict={
+                "ttc_cfg":{
+                    "time_horizon": ttc_time_horizon,
+                    "coll_radius": 0.1,
+                    "safe_distance": 1.0
+                },
+                "traffic_rule_cfg":{
+                    "speed_thresh":0.1,
+                    "light_stop_thresh": 5.0,
+                    "light_slow_thresh": 20.0,
+                    "stop_sign_stop_thresh": 3.0,
+                    "stop_sign_slow_thresh": 18.0,
+                },
+            },
         )
-        if self.use_bev:
-            self.pos_embed = nn.Embedding(1, embed_dims)
-
-        # one learnable query per output
-        # we no longer use speed queries
-        splitter_dim = self.planning_steps  # planning steps
-        if self.predict_control:
-            splitter_dim += 2  #  + steer accel
-                
-        # For RL fine-tuning step:
+        
         self.traj_or_action = 'path_speed'  # 'traj' or 'action' or 'path_speed' or 'path_speed_wp'
 
 
@@ -217,18 +230,6 @@ class PlanningHeadClap(nn.Module):
         return outs_planning
 
     def forward_original_tf(self, 
-                sdc_traj_query, 
-                sdc_track_query,
-                sdc_traj_scores,
-                command,
-                other_traj_queries,
-                other_track_queries,
-                other_traj_scores,
-                tf_track_queries,
-                st_track_queries,
-                can_bus=None,
-                crt_flags_dict=None,
-                local_command_xy=None,
                 **kwargs):
         """
         Re-implementation of forward_original for HiPAD, which has slightly different input structure.
@@ -244,63 +245,82 @@ class PlanningHeadClap(nn.Module):
             - st_track_queries: list of size B, each element is [num_st_tracks, 256]
             - local_command_xy: [B, 2]
         """
-        if sdc_track_query.ndim == 1:
-            sdc_track_query = sdc_track_query.unsqueeze(0).detach()  # [256] -> [1, 256]
-        elif sdc_track_query.ndim == 3:
-            sdc_track_query = sdc_track_query.squeeze(1).detach()
-        navi_embed = self.navi_embed.weight[command]
-        plan_query = torch.cat([sdc_track_query, navi_embed], dim=-1) # [B, 512]
+        bev_embed = kwargs.get("bev_embed") # [B, 512, 10, 12]
+        planner_radar_features = kwargs.get("planner_radar_features") # [B, 20, 256]
+        planner_radar_predictions = kwargs.get("planner_radar_predictions") # [B, 20, 4] x,y,vel,score
+        device = bev_embed.device
+        dtype=self.config.torch_float_type
+        data = kwargs.get("data", {})
+        self.target_points_normalization_constants = self.target_points_normalization_constants.to(device, dtype=dtype)
 
-        plan_query = self.mlp_fuser(plan_query)   # expand, then fuse  # [B, 512] -> [B, 256]
-        
-        B = plan_query.shape[0]  # Batch size
-        path_input = plan_query  # [B, 256]
+        navi_embed = []
+        if self.config.use_discrete_command:
+            command = data["command"].to(
+                device
+            )
+            # command is one-hot encoded [B, 6], need to get index
+            command = torch.argmax(command, dim=-1)
+            navi_embed.append(
+                self.navi_embed.weight[command].unsqueeze(1)
+            )
+        # Encode target point
+        if self.config.use_tp:
+            target_point = data["target_point"].to(
+                device, dtype=torch.float32, non_blocking=True
+            )
+            target_point = target_point / self.target_points_normalization_constants
+            tp_token = self.tp_encoder(target_point).reshape(
+                -1, 1, self.config.transfuser_token_dim
+            )  # (bs, 1, transfuser_token_dim)
+            navi_embed.append(tp_token)
 
-        # Path: GRU autoregressively predicts deltas
-        if self.use_local_tp:
-            if isinstance(local_command_xy, list):
-                local_command_xy = local_command_xy[0]
-            local_command_xy = local_command_xy.to(path_input.dtype)
+        if self.config.use_previous_tp:
+            previous_tp = data["target_point_previous"].to(
+                device, dtype=torch.float32, non_blocking=True
+            )
+            previous_tp = previous_tp / self.target_points_normalization_constants
+            previous_tp_token = self.tp_encoder(previous_tp).reshape(
+                -1, 1, self.config.transfuser_token_dim
+            )  # (bs, 1, transfuser_token_dim)
+            navi_embed.append(previous_tp_token)
 
-        if self.use_gru:
-            if path_input.dim() == 2:
-                path_input = path_input.unsqueeze(0)  # [1, 6, 256]
-            if local_command_xy is not None and local_command_xy.dim() == 2:
-                local_command_xy = local_command_xy.unsqueeze(0)  # [1, 6, 2]
-            path_pred = self.path_gru(path_input, target_point=local_command_xy)  # [B, T, 2]
-        else:
-            if self.use_local_tp:
-                local_feat = self.target_point_fc(local_command_xy)  # [B, 16]
-                path_input = torch.cat([path_input, local_feat], dim=-1)
-            path_pred = self.path_fc(path_input).view(B, self.planning_steps, 2)  # [B, T, 2]
-            path_pred = torch.cumsum(path_pred, dim=1)
-        # Apply bivariate Gaussian activation for PPO
-        # path_pred[0] = bivariate_gaussian_activation(path_pred[0])
+        if self.config.use_next_tp:
+            next_tp = data["target_point_next"].to(
+                device, dtype=torch.float32, non_blocking=True
+            )
+            next_tp = next_tp / self.target_points_normalization_constants
+            next_tp_token = self.tp_encoder(next_tp).reshape(
+                -1, 1, self.config.transfuser_token_dim
+            )  # (bs, 1, transfuser_token_dim)
+            navi_embed.append(next_tp_token)
+
+
+        plan_query = self.dimension_adapter(bev_embed) # [B, transfuser_token_dim, H, W]
+        plan_query = plan_query + self.cosine_pos_embeding(plan_query)  # (B, transfuser_token_dim, H, W)
+        plan_query = torch.flatten(plan_query, start_dim=2)  # (B, transfuser_token_dim, H * W)
+        plan_query = plan_query.permute(0, 2, 1)  # (B, H * W, transfuser_token_dim)
+
+        navi_embed = torch.cat(navi_embed, dim=1)  # [B, (1+1+1+1), transfuser_token_dim]
+
+        plan_nav_query = torch.cat([plan_query, navi_embed], dim=1) # [B, (1+1+1+1) + H * W, transfuser_token_dim]
+
+        B = plan_nav_query.shape[0]  # Batch size
+        path_query = self.transformer_decoder(self.path_query.repeat(B, 1, 1), plan_nav_query) # [B, T, transfuser_token_dim]
+
+        path_pred = self.path_fc(path_query) # [B, T, 2]
+        path_pred = torch.cumsum(path_pred, dim=1)
         
         # Speed: hydra classification logits
         # speed: [B, 1] tensor
         # path_pred: [B, pred_horizon, 2] tensor
-        # flags: list of [B, X] LongTensors, one per flag (optional)
-        
-        if self.speed_combined_attention:
-            speed = can_bus[7].unsqueeze(0) # TODO Make input batch
-        else:
-            speed = None
 
         # Hydra speed head
         hydra_speed_inputs = dict(
-            track_query=other_track_queries, 
-            traj_query=other_traj_queries, 
-            traj_scores=other_traj_scores, 
-            tf_track_query=tf_track_queries, 
-            st_track_query=st_track_queries, 
-            speed=speed, 
             path_pred=path_pred,
-            flags=crt_flags_dict
+            plan_query=plan_query
         )
-        speed_logits, path_pred_augmented = self.speed_branch(**hydra_speed_inputs)  # [B, NUM_PATHS, 2, S], [B, T, 2]
+        speed_logits, path_pred_augmented = self.speed_branch(**hydra_speed_inputs)  # [B, NUM_PATHS, 3, S], [B, AUG_CNT, T, 2]
 
-        # speed_logits = torch.cat([speed_logits_ttc, speed_logits_tl.expand(-1, speed_logits_ttc.shape[1], -1, -1)], dim=2)  # [B, NUM_PATHS, 2*S, 1]
 
         outs_planning = dict(
             sdc_traj=path_pred,
@@ -316,36 +336,44 @@ class PlanningHeadClap(nn.Module):
 
     def forward(self, **kwargs):
         
-        occ_mask = kwargs.get("occ_mask", None)
-        bev_pos = kwargs.get("bev_pos", None)
-        sdc_traj_query = kwargs["sdc_traj_query"]
-        sdc_track_query = kwargs["sdc_track_query"]
-        sdc_traj_scores = kwargs.get("sdc_traj_scores", None)
-        command = kwargs["command"]
-        other_traj_queries = kwargs["other_traj_queries"]
-        other_track_queries = kwargs["other_track_queries"]
-        other_traj_scores = kwargs["other_traj_scores"]
-        tf_track_queries = kwargs.get("tf_track_queries", None)
-        st_track_queries = kwargs.get("st_track_queries", None)
-        crt_flags_dict = kwargs.get("crt_flags_dict", None)
-        can_bus = kwargs["can_bus"]
-        local_command_xy = kwargs.get("local_command_xy", None)
-        model_name = kwargs.get("model_name", "unknown_model")
         return self.forward_original_tf(
-            sdc_traj_query=sdc_traj_query,
-            sdc_track_query=sdc_track_query,
-            sdc_traj_scores=sdc_traj_scores,
-            command=command,
-            other_traj_queries=other_traj_queries,
-            other_track_queries=other_track_queries,
-            other_traj_scores=other_traj_scores,
-            tf_track_queries=tf_track_queries,
-            st_track_queries=st_track_queries,
-            can_bus=can_bus,
-            crt_flags_dict=crt_flags_dict,
-            local_command_xy=local_command_xy,
             **kwargs
         )
+
+    def compute_loss(self, data, predictions, loss, log):
+        """
+        Args:
+            - data: dict: contains ground truth dict
+            - predictions: Perception: contains pred_clapad attribute
+            - loss: dict: holds all losses, where new loss should be appended to it
+        """
+        first_loss = next(iter(loss.values()))
+        device = first_loss.device if hasattr(first_loss, "device") else None
+        # predict spatial path
+        route_label = data["route"].to(
+            device, dtype=self.config.torch_float_type, non_blocking=True
+        )
+        pred_clapad = predictions.pred_clapad
+        pred_route = pred_clapad["sdc_traj"]
+
+        loss["loss_spatial_route"] = F.l1_loss(
+            pred_route, route_label.float()
+        )  # ADE
+        loss["loss_spatial_route"] += F.l1_loss(
+            pred_route[:, -1, :].float(),
+            route_label[:, -1, :].float(),
+        )  # FDE
+
+        curr_speed = data["speed"]
+        path_pred = pred_route
+        scores_pred = pred_clapad["speed_logits"]
+        scene_score_info = data["scene_score_info"]
+        path_pred_augmented = pred_clapad.get("path_pred_augmented", None) # [B, K, T, 2]
+
+        loss_speed = self.loss_speed(curr_speed, path_pred, scores_pred, scene_score_info, path_pred_augmented)
+        loss.update(loss_speed)
+
+        return
 
     def loss(self, sdc_planning, sdc_planning_mask, outs_planning, **kwargs):
         """
@@ -365,15 +393,6 @@ class PlanningHeadClap(nn.Module):
         sdc_traj_all = outs_planning['sdc_traj_all'] # [B, T, 2]
         loss_dict = dict()
         
-        # 1. Collision losses
-        for i in range(len(self.loss_collision)):
-            loss_collision = self.loss_collision[i](
-                sdc_traj_all, 
-                sdc_planning[0, :, :self.planning_steps, :3], 
-                torch.any(sdc_planning_mask[0, :, :self.planning_steps], dim=-1), 
-                future_gt_bbox[0][1:self.planning_steps+1]
-            )
-            loss_dict[f'loss_collision_{i}'] = loss_collision
         
         # 2. Path ADE loss
         loss_ade = self.loss_planning(
@@ -408,34 +427,131 @@ class PlanningHeadClap(nn.Module):
             loss_speed = self.loss_speed(curr_speed, path_pred, scores_pred, scene_score_info, path_pred_augmented)
             loss_dict.update(loss_speed)
         
-        if self.predict_control:
-            if self.control_classification:
-                # 4. Steering loss
-                if self.loss_steering is not None and 'steering_logits' in outs_planning:
-                    steering_logits = outs_planning['steering_logits']  # [B, 8]
-                    loss_steering = self.loss_steering(steering_logits, gt_fut_steer)
-                    loss_dict['loss_steering'] = loss_steering
-
-                # 5. Acceleration loss (throttle and brake mutually exclusive)
-                if self.loss_accel is not None and 'accel_logits' in outs_planning and gt_fut_throttle is not None and gt_fut_brake is not None:
-                    gt_accel = gt_fut_throttle - gt_fut_brake
-                    accel_logits = outs_planning['accel_logits']  # [B, 6]
-                    loss_accel = self.loss_accel(accel_logits, gt_accel)
-                    loss_dict['loss_accel'] = loss_accel
-            else:  # beta dist
-                # 4. Steering loss
-                if self.loss_steering is not None and 'steering_alpha' in outs_planning:
-                    steering_alpha = outs_planning['steering_alpha']  # [B]
-                    steering_beta = outs_planning['steering_beta']  # [B]
-                    loss_steering = self.loss_steering(steering_alpha, steering_beta, gt_fut_steer)
-                    loss_dict['loss_steering'] = loss_steering
-                
-                # 5. Acceleration loss (throttle and brake mutually exclusive)
-                if self.loss_accel is not None and 'accel_alpha' in outs_planning and gt_fut_throttle is not None and gt_fut_brake is not None:
-                    gt_accel = gt_fut_throttle - gt_fut_brake
-                    accel_alpha = outs_planning['accel_alpha']  # [B]
-                    accel_beta = outs_planning['accel_beta']  # [B]
-                    loss_accel = self.loss_accel(accel_alpha, accel_beta, gt_accel)
-                    loss_dict['loss_accel'] = loss_accel
-        
         return loss_dict
+    
+class SpeedScoringLoss(nn.Module):
+    """
+    Provides scores that take into consideration variety of metrics given scene context.
+    These scores are relevant for speed prediction objectives.
+    Model should learn the scoring function.
+    """
+    def __init__(self, speed_bins, crt_cfg_dict):
+        super(SpeedScoringLoss, self).__init__()
+        self.speed_bins = speed_bins # list of speed bin edges to be scored
+        self.num_classes = len(speed_bins)
+        self.crt_cfg_dict = crt_cfg_dict
+        # TTC Config
+        self.ttc_cfg = crt_cfg_dict.get('ttc_cfg', {})
+        self.time_horizon = self.ttc_cfg.get('time_horizon', 0.5)
+        self.coll_radius = self.ttc_cfg.get('coll_radius', 0.1) # Below which we consider collision
+        self.safe_distance = self.ttc_cfg.get('safe_distance', 0.5) # Above which we consider safe
+        # CARLA values multiplied by 2 because CARLA considers half-size
+        self.ego_wl = [0.9183566570281982 * 2, 2.44619083404541 * 2]
+        # Traffic Rule Adherence Config
+        self.traffic_rule_cfg = crt_cfg_dict.get('traffic_rule_cfg', {})
+        self.tl_stop_distance = self.traffic_rule_cfg.get('tl_stop_distance', 6.0) # At this distance all tl speed scores (except 0) should be 0
+        self.ss_stop_distance = self.traffic_rule_cfg.get('ss_stop_distance', 3.0) # At this distance all ss speed scores (except 0) should be 0
+        self.traffic_rule_decel_min = self.traffic_rule_cfg.get('decel_min', 2.5)  # score=1 when required decel <= this
+        self.traffic_rule_decel_max = self.traffic_rule_cfg.get('decel_max', 4.0)  # score=0 when required decel >= this
+        
+        # Scores: NOTE: Do not change order of scores (without changing HydraSpeedHead output order)
+        self.score_cfg = {
+            "TTC_Score": 1.0,
+            "traffic_light": 0.2,
+            "stop_sign": 0.2,
+            # "comfort_scores": 0.5,
+            # "feasibility_scores": 1.0,
+            # "speed_limit": 0.3,
+        }
+
+    def forward(self, curr_speed, path_pred, scores_pred, scene_score_info, path_pred_augmented=None):
+        """
+        Args:
+            current_speed: Tensor of shape [B] - current speed in m/s
+            path_pred: Tensor of shape [B, T, 2] - predicted future path. T is number of future steps
+            scores_pred: Tensor of shape [B, K, H, S_CLS] - model's predicted score logits for each speed bin
+                - B: Batch size, K: Number of augmented paths, H: Number of heads, S_CLS: Number of speed classes
+            scene_score_info: Tensor of shape [B] - scene information for the current step used to compute ground truth scores
+            path_pred_augmented: Tensor of shape [B, K, T, 2] - augmented predicted future path
+        Returns:
+            loss: Scalar tensor
+        """
+        B = path_pred.shape[0]
+        path_pred = path_pred.cpu().detach()
+        path_pred_augmented = path_pred_augmented.cpu().detach() if path_pred_augmented is not None else None
+        curr_speed = curr_speed.cpu()
+        PATH_NUM = scores_pred.shape[1]
+
+        combined_scores = []
+        for i in range(PATH_NUM):
+            if path_pred_augmented is not None:
+                path_pred_i = path_pred_augmented[:,i]
+            else:
+                path_pred_i = path_pred
+            ttc_scores = compute_ttc(
+                path_pred=path_pred_i, # [B, T, 2]
+                scene_score_info=scene_score_info, # List of B size
+                speed_bins=self.speed_bins,
+                time_horizon=self.time_horizon,
+                safe_distance=self.safe_distance,
+                coll_radius=self.coll_radius,
+                ego_wl=self.ego_wl
+            )  # Shape: [B, S_CLS]
+            # traffic lights
+            traffic_light_scores = compute_traffic_light_adherence(
+                speed_bins=self.speed_bins,
+                scene_score_info=scene_score_info,
+                stop_distance_from_trigger=self.tl_stop_distance,
+                decel_min=self.traffic_rule_decel_min,
+                decel_max=self.traffic_rule_decel_max,
+            )  # Shape: [3, S_CLS]
+            stop_sign_scores = compute_stop_sign_adherence(
+                speed_bins=self.speed_bins,
+                scene_score_info=scene_score_info,
+                stop_distance_from_trigger=self.ss_stop_distance,
+                decel_min=self.traffic_rule_decel_min,
+                decel_max=self.traffic_rule_decel_max,
+            )  # Shape: [3, S_CLS]
+
+            # NOTE: Do not change order of scores (without changing HydraSpeedHead output order)
+            combined = torch.stack([ttc_scores, traffic_light_scores, stop_sign_scores], dim=1)  # [B, H, S_CLS]
+            combined_scores.append(combined)
+
+
+        # Stack over K (paths): [K, B, H, S_CLS]
+        combined_scores = torch.stack(combined_scores, dim=1).to(scores_pred.device)  # [B, K, H, S_CLS]
+
+        # For debugging:
+        raw_scores = {}
+        for idx, score in enumerate(self.score_cfg.keys()):
+            raw_scores[score] = combined_scores[:,:, idx, :]  # Shape: [B, K, S_CLS]
+
+        # log_pred = torch.log_softmax(scores_pred, dim=-1)   # [B, K, S]
+        # pred = torch.sigmoid(scores_pred)
+        losses = {}
+        total_loss = 0.0
+        B, K, H, S_CLS = combined_scores.shape
+        for i, (key, base_weight) in enumerate(self.score_cfg.items()):
+            gt = combined_scores[:, :, i, :]  # [B, K, S_CLS]
+            pred = scores_pred[:, :, i, :]    # [B, K, S_CLS]
+
+            is_safe_scenario = torch.all(gt >= 0.99, dim=-1)  # [B, K]
+            # Dynamic weight per path
+            dynamic_sample_weight = torch.where(
+                is_safe_scenario,
+                torch.ones_like(is_safe_scenario, dtype=gt.dtype),
+                torch.ones_like(is_safe_scenario, dtype=gt.dtype) * 10
+            )  # [B, K]
+
+            # BCE loss per sample and path, summed over S_CLS
+            kl = F.binary_cross_entropy_with_logits(pred, gt, reduction="none").sum(dim=-1)  # [B, K]
+            kl = kl * dynamic_sample_weight  # [B, K]
+            loss_i = kl.mean()  # scalar: mean over batch and path
+            weighted_loss = base_weight * loss_i
+            losses[key] = weighted_loss # These are added to the dict to be tracked but only loss_speed_scores will be backpropagated not these separate losses
+            total_loss += weighted_loss
+
+        losses["loss_speed_scores"] = total_loss # "loss" should be in the name if intended to be backpropagated
+        # losses["raw_scores"] = raw_scores
+
+        return losses
