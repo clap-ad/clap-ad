@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Set which GPUs to use (comma-separated, e.g., "0,1,2,3")
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
 
 export OMP_NUM_THREADS=$(nproc)
 export OPENBLAS_NUM_THREADS=1 # Shuts off numpy multithreading, to avoid threads spawning other threads.
@@ -24,7 +24,7 @@ export USER_NAME="eaghajanzadeh"
 
 echo "Using GPUs: $CUDA_VISIBLE_DEVICES for training"
 
-/usr/bin/python3.10 -m torch.distributed.run \
+uv run python -m torch.distributed.run \
     --standalone \
     --nnodes=1 \
     --nproc_per_node=$nproc_per_node \
