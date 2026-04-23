@@ -273,7 +273,7 @@ class TrainingConfig(BaseConfig):
         """Batch size for training."""
         if self.debug_mode:
             return 2
-        return 64
+        return 512
 
     @property
     def torch_float_type(self):
@@ -313,7 +313,7 @@ class TrainingConfig(BaseConfig):
     gradient_as_bucket_view = False
 
     # Number of data loader workers to prefetch batches.
-    prefetch_factor = 16
+    prefetch_factor = 4
 
     @property
     def compile(self):
@@ -1083,7 +1083,7 @@ class TrainingConfig(BaseConfig):
         """Number of data loader workers per CPU core."""
         if not self.mixed_data_training and not self.use_carla_data:
             return 1
-        return 1
+        return 10
 
     def training_dict(self) -> dict[str, Any]:
         """Convert training configuration to a dictionary for serialization and logging."""
