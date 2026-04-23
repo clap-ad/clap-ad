@@ -142,19 +142,29 @@ class TFv6(nn.Module):
             planner_radar_predictions = radar_predictions
             if not self.config.use_radar_detection or not self.config.use_carla_data:
                 planner_radar_features = planner_radar_predictions = None
-            (
-                pred_route,
-                pred_future_waypoints,
-                pred_target_speed_distribution,
-                pred_target_speed_scalar,
-                pred_headings,
-            ) = self.planning_decoder(
-                bev_embed=bev_features,
-                planner_radar_features=planner_radar_features,
-                planner_radar_predictions=planner_radar_predictions,
-                data=data,
-                log=self.log,
-            )
+            
+            if self.config.use_clapad_head:
+                clap_prediction_dict = self.planning_decoder(
+                    bev_embed=bev_features,
+                    planner_radar_features=planner_radar_features,
+                    planner_radar_predictions=planner_radar_predictions,
+                    data=data,
+                    log=self.log,
+                )
+            else:
+                (
+                    pred_route,
+                    pred_future_waypoints,
+                    pred_target_speed_distribution,
+                    pred_target_speed_scalar,
+                    pred_headings,
+                ) = self.planning_decoder(
+                    bev_embed=bev_features,
+                    planner_radar_features=planner_radar_features,
+                    planner_radar_predictions=planner_radar_predictions,
+                    data=data,
+                    log=self.log,
+                )
 
         # Semantic segmentation forward pass
         if self.config.use_carla_data and self.config.use_semantic:
@@ -201,6 +211,7 @@ class TFv6(nn.Module):
             pred_bev_semantic=pred_bev_semantic,
             pred_radar_features=radar_features,
             pred_radar_predictions=radar_predictions,
+            pred_clapad=clap_prediction_dict,
             # NavSim perception prediction
             pred_bounding_box_navsim=pred_bounding_box_navsim,
             pred_bev_semantic_navsim=pred_bev_semantic_navsim,
@@ -301,3 +312,4 @@ class Prediction:
         jt.Float[torch.Tensor, "bs num_bev_classes_navsim bev_height bev_width"] | None
     )
     pred_headings: jt.Float[torch.Tensor, "bs n_waypoints"] | None
+    pred_clapad: dict | None

@@ -79,6 +79,59 @@ def _compute_ttc_for_bin(
         coll_radius, ego_wl
     ):
     """
+    Batched version: path_pred [B, T, 2], scene_score_info is list of B dicts.
+    Returns: torch.Tensor of shape [B]
+    """
+    B, T, _ = path_pred.shape
+    device = path_pred.device
+    results = []
+    for b in range(B):
+        # Ego position and velocity (2D)
+        p_e = np.array([0.0, 0.0])  # Assume ego starts at origin
+
+        # Predict ego position after TIME_HORIZON on the given path
+        target_dist = speed * time_horizon
+        cum_dist = np.arange(T)
+        p_e_future = np.array([
+            np.interp(target_dist, cum_dist, path_pred[b, :, 0].cpu().numpy()),
+            np.interp(target_dist, cum_dist, path_pred[b, :, 1].cpu().numpy())
+        ])
+
+        threat_actor = None
+        min_distance = safe_distance
+        for actor in scene_score_info[b]["actors"]:
+            if not actor["ttc_cal"]:
+                continue
+            if actor["p_o_x_fut"] is None:
+                continue
+            p_o = np.array([actor["p_o_x"], actor["p_o_y"]])
+            p_o_future = np.array([actor["p_o_x_fut"], actor["p_o_y_fut"]])
+            dist_future = _compute_swept_bbox_distance(
+                p_e_now=p_e,
+                p_e_future=p_e_future,
+                p_o_now=p_o,
+                p_o_future=p_o_future,
+                ego_wl=ego_wl,
+                obj_wl=actor["bbox"]
+            )
+            if dist_future < min_distance:
+                threat_actor = actor
+                min_distance = dist_future
+        if min_distance >= safe_distance:
+            results.append(1.0)
+        elif min_distance <= coll_radius:
+            results.append(0.0)
+        else:
+            ttc = (min_distance - coll_radius) / (safe_distance - coll_radius)
+            results.append(ttc)
+    return torch.tensor(results, device=device)
+
+def _compute_ttc_for_bin_dep(
+        speed, path_pred, scene_score_info,
+        time_horizon, safe_distance,
+        coll_radius, ego_wl
+    ):
+    """
     It calculates TTC for a given speed and path. 
     Basically, it predicts where the ego vehicle would be after TIME_HORIZON
     """
@@ -157,7 +210,8 @@ def compute_ttc(path_pred, scene_score_info, speed_bins,
             ego_wl=ego_wl,
         )
         ttc.append(speed_score)
-    return torch.stack(ttc).unsqueeze(0)  # Shape: [B, num_classes]
+    # return torch.stack(ttc).unsqueeze(0)  # Shape: [B, num_classes]
+    return torch.stack(ttc, dim=0).T  # Shape: [B, num_bins]
 
 def compute_comfort(speed, speed_bins):
     """
@@ -242,6 +296,45 @@ def compute_traffic_light_adherence(
     decel_max,
 ):
     """
+    Batched version: scene_score_info is a list of B dicts.
+    Returns: torch.Tensor of shape [B, num_bins]
+    """
+    B = len(scene_score_info)
+    num_bins = len(speed_bins)
+    all_scores = []
+    for b in range(B):
+        rules_score = [1.0 for _ in speed_bins]
+        traffic_rules_info = scene_score_info[b].get("traffic_rules", {})
+        for tf_rule in traffic_rules_info:
+            if tf_rule["type"] == "traffic_light":
+                light_state = tf_rule["state"]  # 0: Red, 1:Yellow, 2:Green
+                light_distance = tf_rule["dist_to_trig"]  # in meters
+                affects_ego = tf_rule["affects_ego"]
+                if light_state != 2 and affects_ego:
+                    for idx, bin_speed in enumerate(speed_bins):
+                        if bin_speed < 1e-2:
+                            rules_score[idx] = 1.0
+                            continue
+                        required_decel = _required_decel_to_stop(
+                            speed=bin_speed,
+                            dist_to_trig=light_distance,
+                            stop_distance_from_trigger=stop_distance_from_trigger,
+                        )
+                        if math.isinf(required_decel):
+                            rules_score[idx] = 0.0
+                        else:
+                            rules_score[idx] = _decel_to_score(required_decel, decel_min, decel_max)
+        all_scores.append(rules_score)
+    return torch.tensor(all_scores, dtype=torch.float32)  # Shape: [B, num_bins]
+
+def compute_traffic_light_adherence_dep(
+    speed_bins,
+    scene_score_info,
+    stop_distance_from_trigger,
+    decel_min,
+    decel_max,
+):
+    """
     Compute traffic light adherence scores based on scene information.
     It considers the following:
         - Traffic lights: similar to stop signs.
@@ -282,6 +375,44 @@ def compute_traffic_light_adherence(
     return torch.tensor(list(rules_score_dict.values()))  # Shape: [3, num_classes]
 
 def compute_stop_sign_adherence(
+    speed_bins,
+    scene_score_info,
+    stop_distance_from_trigger,
+    decel_min,
+    decel_max,
+):
+    """
+    Batched version: scene_score_info is a list of B dicts.
+    Returns: torch.Tensor of shape [B, num_bins]
+    """
+    B = len(scene_score_info)
+    num_bins = len(speed_bins)
+    all_scores = []
+    for b in range(B):
+        rules_score = [1.0 for _ in speed_bins]
+        traffic_rules_info = scene_score_info[b].get("traffic_rules", {})
+        for tf_rule in traffic_rules_info:
+            if tf_rule["type"] == "stop_sign":
+                distance = tf_rule["dist_to_trig"]  # in meters
+                affects_ego = tf_rule["affects_ego"]
+                if affects_ego:
+                    for idx, bin_speed in enumerate(speed_bins):
+                        if bin_speed < 1e-2:
+                            rules_score[idx] = 1.0
+                            continue
+                        required_decel = _required_decel_to_stop(
+                            speed=bin_speed,
+                            dist_to_trig=distance,
+                            stop_distance_from_trigger=stop_distance_from_trigger,
+                        )
+                        if math.isinf(required_decel):
+                            rules_score[idx] = 0.0
+                        else:
+                            rules_score[idx] = _decel_to_score(required_decel, decel_min, decel_max)
+        all_scores.append(rules_score)
+    return torch.tensor(all_scores, dtype=torch.float32)  # Shape: [B, num_bins]
+
+def compute_stop_sign_adherence_dep(
     speed_bins,
     scene_score_info,
     stop_distance_from_trigger,
@@ -377,4 +508,4 @@ def lateral_shift_paths(path):
 
     aug_paths.append(curved_path)
 
-    return torch.stack(aug_paths, dim=1)  # [B, K, T, 2]
+    return torch.stack(aug_paths, dim=1)  # [B, K+1, T, 2]
