@@ -8,21 +8,49 @@ from leaderboard.utils.checkpoint_tools import fetch_dict
 
 
 class RouteIndexer():
-    def __init__(self, routes_file, repetitions, routes_subset):
-        self._configs_dict = OrderedDict()
+    def __init__(self, routes_file, repetitions, routes_subset, keep_repetition_order=True, local_rank=0, world_size=1, shuffle=False):
+        # Keep_repetition_order==True means that the order of route repetitions is preserved
+        # For example repetition = 3:
+        # (Route1, Route1, Route1, Route2, Route2, Route2)
         self._configs_list = []
         self.index = 0
-
         route_configurations = RouteParser.parse_routes_file(routes_file, routes_subset)
         self.total = len(route_configurations) * repetitions
-
-        for i, config in enumerate(route_configurations):
+        if keep_repetition_order:
+            self._configs_dict = OrderedDict()
+            for i, config in enumerate(route_configurations):
+                for repetition in range(repetitions):
+                    config.index = i * repetitions + repetition
+                    config.repetition_index = repetition
+                    self._configs_dict['{}.{}'.format(config.name, repetition)] = copy.copy(config)
+        else:
+            self._configs_dict = dict()
             for repetition in range(repetitions):
-                config.index = i * repetitions + repetition
-                config.repetition_index = repetition
-                self._configs_dict['{}.{}'.format(config.name, repetition)] = copy.copy(config)
-
+                for i, config in enumerate(route_configurations):
+                    config_copy = copy.copy(config)
+                    config_copy.index = repetition * len(route_configurations) + i
+                    config_copy.repetition_index = repetition
+                    self._configs_dict[f'{config.name}.{repetition}'] = config_copy
         self._configs_list = list(self._configs_dict.values())
+
+        # For Multi-GPU training
+        if world_size > 1:
+            self.local_rank = local_rank
+            self.world_size = world_size
+            self._configs_list = self._configs_list[self.local_rank::self.world_size]
+            if shuffle:
+                import random
+                random.seed(42)
+                random.shuffle(self._configs_list)
+        else:
+            self._configs_list = self._configs_list
+
+        # Assign local indices AFTER sharding
+        for local_i, cfg in enumerate(self._configs_list):
+            cfg.index = local_i
+
+        # Total per process
+        self.total = len(self._configs_list)
 
 
     def peek(self):
@@ -34,6 +62,16 @@ class RouteIndexer():
 
         config = self._configs_list[self.index]
         self.index += 1
+
+        return config
+
+    def get_next_config_circular(self):
+
+        config = self._configs_list[self.index]
+        self.index += 1
+
+        if self.index >= self.total:
+            self.index = 0
 
         return config
 

@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 import xml.etree.ElementTree as ET
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
@@ -43,6 +44,7 @@ class ModeConfig:
         checkpoint: str | None,
         routes: str,
         use_py123d: bool = False,
+        is_irl_fuser_agent: bool = False,
     ) -> tuple[LeaderboardType, str, str, str | None, str]:
         """Get mode configuration based on CLI arguments.
 
@@ -54,6 +56,7 @@ class ModeConfig:
             checkpoint: Model checkpoint path (None for expert)
             routes: Routes file path
             use_py123d: Whether to use expert_py123d.py instead of expert.py
+            is_irl_fuser_agent: Whether IRL-Fuser agent mode is selected
 
         Returns:
             Tuple of (leaderboard_type, agent, agent_config, checkpoint_dir, track)
@@ -88,6 +91,15 @@ class ModeConfig:
                 "MAP",
             )
 
+        if is_irl_fuser_agent:
+            return (
+                _resolve_leaderboard_type(),
+                "lead/inference/irl_fuser_agent.py",
+                checkpoint,
+                checkpoint,
+                "SENSORS",
+            )
+
         return (
             _resolve_leaderboard_type(),
             "lead/inference/sensor_agent.py",
@@ -118,9 +130,12 @@ class LeaderboardWrapper:
         # Resolve workspace root from environment variable
         self.workspace_root = Path(os.environ["LEAD_PROJECT_ROOT"]).resolve()
 
-        # Parse scenario type from routes XML file and extract route ID
+        # Parse scenario type from routes XML file
         self.scenario_type = self._parse_scenario_type_from_routes()
-        self.route_id = self.routes.stem.split("_")[0]
+        self.routes_name = self.routes.stem
+
+        # Generate a run timestamp (shared across all ranks)
+        self.run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     def _parse_scenario_type_from_routes(self) -> str:
         """Parse scenario type from the first scenario in the routes XML file.
@@ -165,13 +180,18 @@ class LeaderboardWrapper:
             - carla_path: (AUTOPILOT only) Path to CARLA Python API
         """
         if self.leaderboard_type == LeaderboardType.BENCH2DRIVE:
+            evaluator_name = (
+                "leaderboard_evaluator_multigpu.py"
+                if getattr(self.args, "multigpu", False)
+                else "leaderboard_evaluator.py"
+            )
             return {
                 "leaderboard_root": self.workspace_root
                 / "3rd_party/Bench2Drive/leaderboard",
                 "scenario_runner_root": self.workspace_root
                 / "3rd_party/Bench2Drive/scenario_runner",
                 "evaluator_script": self.workspace_root
-                / "3rd_party/Bench2Drive/leaderboard/leaderboard/leaderboard_evaluator.py",
+                / f"3rd_party/Bench2Drive/leaderboard/leaderboard/{evaluator_name}",
                 "evaluator_module": "leaderboard.leaderboard_evaluator",
                 "carla_path": self.workspace_root
                 / "3rd_party/CARLA_0915/PythonAPI/carla",
@@ -258,8 +278,11 @@ class LeaderboardWrapper:
             # Expert evaluation: debug directory
             return self.workspace_root / "outputs/expert_evaluation/"
         else:
-            # Model evaluation: organize by scenario and route
-            return self.workspace_root / f"outputs/local_evaluation/{self.route_id}"
+            # Model evaluation: organize by routes name and run timestamp
+            return (
+                self.workspace_root
+                / f"outputs/local_evaluation/{self.routes_name}_{self.run_timestamp}"
+            )
 
     def _setup_leaderboard_environment(
         self,
@@ -285,8 +308,6 @@ class LeaderboardWrapper:
             "LEADERBOARD_ROOT": str(paths["leaderboard_root"]),
             "ROUTES": str(self.routes.absolute()),
             "SCENARIO_TYPE": self.scenario_type,
-            "BENCHMARK_ROUTE_ID": self.route_id,
-            "ROUTE_NUMBER": self.route_id,
             "PYTHONUNBUFFERED": "1",
             "IS_BENCH2DRIVE": "1"
             if self.leaderboard_type == LeaderboardType.BENCH2DRIVE
@@ -319,6 +340,17 @@ class LeaderboardWrapper:
                     "CUBLAS_WORKSPACE_CONFIG",
                     ":4096:8",
                 )
+
+            if getattr(self.args, "multigpu", False):
+                # multigpu evaluator reads CUDA_VISIBLE_DEVICES and CARLA_GPU
+                # to map each rank to a CARLA server port
+                cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+                if not cuda_devices:
+                    cuda_devices = ",".join(
+                        str(i) for i in range(self.args.nproc_per_node)
+                    )
+                env_vars["CUDA_VISIBLE_DEVICES"] = cuda_devices
+                env_vars["CARLA_GPU"] = os.environ.get("CARLA_GPU", cuda_devices)
 
         # Apply to os.environ
         for key, value in env_vars.items():
@@ -384,6 +416,7 @@ class LeaderboardWrapper:
                 checkpoint=self.args.checkpoint,
                 routes=str(self.routes),
                 use_py123d=self.args.py123d if hasattr(self.args, "py123d") else False,
+                is_irl_fuser_agent=getattr(self.args, "irl_fuser_agent", False),
             )
         )
         self.leaderboard_type = leaderboard_type
@@ -411,9 +444,29 @@ class LeaderboardWrapper:
         )
         debug_checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
 
-        cmd = [
-            sys.executable,
-            str(paths["evaluator_script"]),
+        is_multigpu = getattr(self.args, "multigpu", False)
+
+        if is_multigpu:
+            # Launch via torch.distributed.run for multi-GPU
+            cmd = [
+                sys.executable,
+                "-u",
+                "-m",
+                "torch.distributed.run",
+                f"--nproc_per_node={self.args.nproc_per_node}",
+                f"--master_port={self.args.master_port}",
+                "--standalone",
+                "--nnodes=1",
+                "--node_rank=0",
+                str(paths["evaluator_script"]),
+            ]
+        else:
+            cmd = [
+                sys.executable,
+                str(paths["evaluator_script"]),
+            ]
+
+        cmd.extend([
             "--routes",
             str(self.routes.absolute()),
             "--track",
@@ -438,7 +491,19 @@ class LeaderboardWrapper:
             str(self.args.repetitions),
             "--timeout",
             str(self.args.timeout),
-        ]
+        ])
+
+        # Add multi-GPU specific arguments
+        if is_multigpu:
+            cmd.extend([
+                "--gpu-rank",
+                str(self.args.gpu_rank),
+            ])
+            if self.args.routes_subset:
+                cmd.extend([
+                    "--routes-subset",
+                    self.args.routes_subset,
+                ])
 
         # Add debug checkpoint if not autopilot
         if leaderboard_type != LeaderboardType.AUTOPILOT:
@@ -454,7 +519,6 @@ class LeaderboardWrapper:
         LOG.info("=" * 80)
         LOG.info(f"Routes: {self.routes}")
         LOG.info(f"Scenario Type: {self.scenario_type}")
-        LOG.info(f"Route ID: {self.route_id}")
         LOG.info(f"Output Dir: {resolved_output_path}")
         for key, value in env_vars.items():
             LOG.info(f"{key}: {value}")
@@ -554,6 +618,9 @@ Examples:
 
   # Evaluate expert for data generation
   python $LEAD_PROJECT_ROOT/lead/leaderboard_wrapper.py --expert --routes data/data_routes/lead/noScenarios/short_route.xml
+
+  # Multi-GPU Bench2Drive evaluation (8 GPUs)
+  python $LEAD_PROJECT_ROOT/lead/leaderboard_wrapper.py --checkpoint outputs/checkpoints/model --routes data/benchmark_routes/bench2drive/routes.xml --bench2drive --multigpu --nproc-per-node 8 --timeout 6000
         """,
     )
 
@@ -593,6 +660,11 @@ Examples:
         "--carl-agent",
         action="store_true",
         help="Use lead/carl_agent/carl_agent.py with MAP track (requires --checkpoint)",
+    )
+    parser.add_argument(
+        "--irl-fuser-agent",
+        action="store_true",
+        help="Use lead/inference/irl_fuser_agent.py with SENSORS track (requires --checkpoint)",
     )
 
     # Py123D option for expert mode
@@ -647,6 +719,37 @@ Examples:
         "--output-dir",
         type=str,
         help="Output directory (auto-generated if not specified)",
+    )
+
+    # Multi-GPU settings
+    parser.add_argument(
+        "--multigpu",
+        action="store_true",
+        help="Use multi-GPU evaluation via torch.distributed.run (uses leaderboard_evaluator_multigpu.py)",
+    )
+    parser.add_argument(
+        "--nproc-per-node",
+        type=int,
+        default=1,
+        help="Number of processes per node for multi-GPU (default: 1)",
+    )
+    parser.add_argument(
+        "--master-port",
+        type=int,
+        default=548,
+        help="Master port for torch.distributed (default: 548)",
+    )
+    parser.add_argument(
+        "--gpu-rank",
+        type=int,
+        default=0,
+        help="GPU rank for multi-GPU evaluation (default: 0)",
+    )
+    parser.add_argument(
+        "--routes-subset",
+        type=str,
+        default="",
+        help="Execute a specific set of routes (for multi-GPU evaluation)",
     )
 
     return parser
@@ -704,8 +807,19 @@ def main() -> None:
     if args.carl_agent and not args.checkpoint:
         parser.error("--carl-agent requires --checkpoint")
 
+    # Validate irl-fuser mode flag
+    if getattr(args, "irl_fuser_agent", False) and not args.checkpoint:
+        parser.error("--irl-fuser-agent requires --checkpoint")
+
+    # Validate multigpu flag
+    if args.multigpu and args.expert:
+        parser.error("--multigpu is not supported with --expert mode")
+
     # Set GPU for model evaluation
-    if args.checkpoint and not args.carl_agent:
+    if args.multigpu:
+        # Multi-GPU: don't restrict CUDA_VISIBLE_DEVICES, let torch.distributed handle it
+        pass
+    elif args.checkpoint and not args.carl_agent and not getattr(args, "irl_fuser_agent", False):
         os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
 
     # Log mode information
@@ -714,6 +828,14 @@ def main() -> None:
         LOG.info(f"Running in expert mode with {agent_type} agent")
     elif args.carl_agent:
         LOG.info("Running in CaRL evaluation mode")
+    elif getattr(args, "irl_fuser_agent", False):
+        LOG.info("Running in IRL-Fuser evaluation mode")
+
+    if args.multigpu:
+        LOG.info(
+            f"Multi-GPU mode: nproc_per_node={args.nproc_per_node}, "
+            f"master_port={args.master_port}",
+        )
 
     # Create wrapper and run
     result = LeaderboardWrapper(args).run()

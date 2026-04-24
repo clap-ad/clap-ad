@@ -303,6 +303,12 @@ class LeaderboardEvaluator(object):
 
             self.agent_instance = agent_class_obj(args.host, args.port, args.debug)
             self.agent_instance.set_global_plan(self.route_scenario.gps_route, self.route_scenario.route)
+
+            # Set per-route ID so the agent can use it for output file naming
+            route_id_from_config = config.name.replace("RouteScenario_", "")
+            os.environ["BENCHMARK_ROUTE_ID"] = route_id_from_config
+            os.environ["ROUTE_NUMBER"] = route_id_from_config
+
             self.agent_instance.setup(args.agent_config)
 
             # Check and store the sensors

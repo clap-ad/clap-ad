@@ -4,7 +4,7 @@ import argparse
 import os
 
 def merge_route_json(folder_path):
-    file_paths = glob.glob(f'{folder_path}/*.json')
+    file_paths = glob.glob(f'{folder_path}/checkpoint*.json')
     merged_records = []
     driving_score = []
     success_num = 0
@@ -14,7 +14,8 @@ def merge_route_json(folder_path):
             data = json.load(file)
             records = data['_checkpoint']['records']
             for rd in records:
-                rd.pop('index')
+                if 'index' in rd:
+                    rd.pop('index')
                 merged_records.append(rd)
                 driving_score.append(rd['scores']['score_composed'])
                 if rd['status']=='Completed' or rd['status']=='Perfect':
@@ -35,8 +36,8 @@ def merge_route_json(folder_path):
 
     merged_data = {
         "_checkpoint": _checkpoint,
-        "driving score": sum(driving_score) / 220,
-        "success rate": success_num / 220,
+        "driving score": sum(driving_score) / len(driving_score),
+        "success rate": success_num / len(driving_score),
         "eval num": len(driving_score),
     }
 
@@ -45,6 +46,6 @@ def merge_route_json(folder_path):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('-f', '--folder', help='old foo help')
+    parser.add_argument('-f', '--folder', help='Path to the folder containing JSON files to merge')
     args = parser.parse_args()
     merge_route_json(args.folder)

@@ -62,7 +62,7 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
         self.config_path = path_to_conf_file
         self.step = -1
         self.initialized = False
-        self.device = torch.device("cuda:0")
+        self.device = torch.device(f"cuda:{int(os.environ.get('LOCAL_RANK', 0))}")
 
         # Load the config saved during training
         if self.config_closed_loop.is_bench2drive:
