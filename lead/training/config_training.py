@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from typing import Any
 
 import torch
@@ -212,7 +213,7 @@ class TrainingConfig(BaseConfig):
         return tmp_folder
 
     # Root directory for CARLA sensor data.
-    carla_root = "data/carla_leaderboard2"
+    carla_root = "/workspace/lead/data/carla_leaderboard2"
 
     @property
     def carla_data(self):
@@ -221,7 +222,11 @@ class TrainingConfig(BaseConfig):
 
     # --- Training ---
     # Directory to log data to.
-    logdir = None
+    # logdir = None
+    use_slurm = False
+    user_name = os.environ.get("USER_NAME", "default_user")
+    experiment_name = f"TestBy{user_name}_{time.strftime('%Y%m%d_%H%M%S', time.localtime())}"
+    logdir = f"/workspace/lead/outputs/local_training/{experiment_name}"
     # PNG compression level for storing images
     training_png_compression_level = 6
     # Minimum number of LiDAR points for a vehicle to be considered valid.
@@ -270,7 +275,7 @@ class TrainingConfig(BaseConfig):
         """Batch size for training."""
         if self.debug_mode:
             return 2
-        return 64
+        return 512
 
     @property
     def torch_float_type(self):
@@ -304,7 +309,7 @@ class TrainingConfig(BaseConfig):
 
     # --- Training speed and memory optimization ---
     # Number of data loader workers to prefetch batches.
-    prefetch_factor = 16
+    prefetch_factor = 4
 
     @property
     def compile(self):
@@ -983,13 +988,16 @@ class TrainingConfig(BaseConfig):
         if self.debug_mode:
             return 1
         try:
-            with open(
-                os.path.join(
-                    self.lead_project_root,
-                    "slurm/configs/wandb_log_frequency_training_scalar.txt",
-                ),
-            ) as f:
-                return int(f.readline().strip())
+            if self.use_slurm:
+                with open(
+                    os.path.join(
+                        self.lead_project_root,
+                        "slurm/configs/wandb_log_frequency_training_scalar.txt",
+                    )
+                ) as f:
+                    return int(f.readline().strip())
+            else:
+                return 1
         except Exception as e:
             LOG.error(f"Error reading log frequency file: {e}.")
             return 1
@@ -1000,13 +1008,16 @@ class TrainingConfig(BaseConfig):
         if self.debug_mode:
             return 100
         try:
-            with open(
-                os.path.join(
-                    self.lead_project_root,
-                    "slurm/configs/wandb_log_frequency_training_images.txt",
-                ),
-            ) as f:
-                return int(f.readline().strip())
+            if self.use_slurm:
+                with open(
+                    os.path.join(
+                        self.lead_project_root,
+                        "slurm/configs/wandb_log_frequency_training_images.txt",
+                    )
+                ) as f:
+                    return int(f.readline().strip())
+            else:
+                return 100
         except Exception as e:
             LOG.error(f"Error reading log frequency file: {e}.")
             return 100
@@ -1014,6 +1025,13 @@ class TrainingConfig(BaseConfig):
     @overridable_property
     def log_wandb(self):
         """If true log metrics to Weights & Biases."""
+        if self.debug_mode:
+            return False
+        return False
+
+    @overridable_property
+    def log_clearml(self):
+        """If true log metrics to ClearML."""
         if self.debug_mode:
             return False
         return True
@@ -1055,7 +1073,7 @@ class TrainingConfig(BaseConfig):
         """Number of data loader workers per CPU core."""
         if not self.mixed_data_training and not self.use_carla_data:
             return 1
-        return 1
+        return 10
 
     def training_dict(self) -> dict[str, Any]:
         """Convert training configuration to a dictionary for serialization and logging."""

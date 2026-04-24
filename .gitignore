@@ -171,6 +171,7 @@ slurm-*.out
 3rd_party/CARLA_0915
 3rd_party/CARLA_0916
 3rd_party/CARLA_F2D
+/workspace/lead/3rd_party/fail2drive
 outputs/
 docs/build/
 !slurm/

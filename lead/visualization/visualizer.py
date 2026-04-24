@@ -434,7 +434,7 @@ class Visualizer:
                     draw = ImageDraw.Draw(img_pil)
 
                     try:
-                        font = ImageFont.truetype("3rd_party/Roboto-Bold.ttf", 20)
+                        font = ImageFont.truetype("/workspace/lead/3rd_party/Roboto-Bold.ttf", 20)
                     except:
                         font = ImageFont.load_default()
 
@@ -1306,8 +1306,8 @@ class Visualizer:
         text_lines = sorted(text_lines)
 
         # Load fonts once
-        font_regular = ImageFont.truetype("3rd_party/Roboto-Regular.ttf", 17)
-        font_bold = ImageFont.truetype("3rd_party/Roboto-Bold.ttf", 17)
+        font_regular = ImageFont.truetype("/workspace/lead/3rd_party/Roboto-Regular.ttf", 17)
+        font_bold = ImageFont.truetype("/workspace/lead/3rd_party/Roboto-Bold.ttf", 17)
 
         img_pil = Image.fromarray(self.meta_panel)
         draw = ImageDraw.Draw(img_pil)
