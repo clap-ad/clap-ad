@@ -32,12 +32,16 @@ def _get_bbox_distance(ego_x, ego_y, ego_w, ego_l, obj_x, obj_y, obj_w, obj_l):
     """
     Calculates the shortest distance between two axis-aligned bounding boxes.
     Assumes x,y is the center of the box.
+
+    Because in Lead, x is forward and y is right, we treat ego_w as the width along the y-axis and ego_l as the length along the x-axis.
     """
     # Calculate the distance between edges on the X axis
-    dx = max(0, abs(ego_x - obj_x) - (ego_w + obj_w) / 2)
+    # dx = max(0, abs(ego_x - obj_x) - (ego_w + obj_w) / 2)
+    dx = max(0, abs(ego_x - obj_x) - (ego_l + obj_l) / 2)
     
     # Calculate the distance between edges on the Y axis
-    dy = max(0, abs(ego_y - obj_y) - (ego_l + obj_l) / 2)
+    # dy = max(0, abs(ego_y - obj_y) - (ego_l + obj_l) / 2)
+    dy = max(0, abs(ego_y - obj_y) - (ego_w + obj_w) / 2)
     
     # If both dx and dy are 0, the boxes are colliding
     return math.sqrt(dx**2 + dy**2)
@@ -106,13 +110,15 @@ def _compute_ttc_for_bin(
                 continue
             p_o = np.array([actor["p_o_x"], actor["p_o_y"]])
             p_o_future = np.array([actor["p_o_x_fut"], actor["p_o_y_fut"]])
+            # Convert bbox to list of two numpy floats if needed
+            obj_wl = [float(x) for x in actor["bbox"]]
             dist_future = _compute_swept_bbox_distance(
                 p_e_now=p_e,
                 p_e_future=p_e_future,
                 p_o_now=p_o,
                 p_o_future=p_o_future,
                 ego_wl=ego_wl,
-                obj_wl=actor["bbox"]
+                obj_wl=obj_wl
             )
             if dist_future < min_distance:
                 threat_actor = actor
@@ -306,59 +312,13 @@ def compute_traffic_light_adherence(
         rules_score = [1.0 for _ in speed_bins]
         traffic_rules_info = scene_score_info[b].get("traffic_rules", {})
         for tf_rule in traffic_rules_info:
+            if isinstance(tf_rule["type"], list):
+                tf_rule["type"] = tf_rule["type"][0]  # Handle case where type is a list
             if tf_rule["type"] == "traffic_light":
-                light_state = tf_rule["state"]  # 0: Red, 1:Yellow, 2:Green
                 light_distance = tf_rule["dist_to_trig"]  # in meters
-                affects_ego = tf_rule["affects_ego"]
-                if light_state != 2 and affects_ego:
-                    for idx, bin_speed in enumerate(speed_bins):
-                        if bin_speed < 1e-2:
-                            rules_score[idx] = 1.0
-                            continue
-                        required_decel = _required_decel_to_stop(
-                            speed=bin_speed,
-                            dist_to_trig=light_distance,
-                            stop_distance_from_trigger=stop_distance_from_trigger,
-                        )
-                        if math.isinf(required_decel):
-                            rules_score[idx] = 0.0
-                        else:
-                            rules_score[idx] = _decel_to_score(required_decel, decel_min, decel_max)
-        all_scores.append(rules_score)
-    return torch.tensor(all_scores, dtype=torch.float32)  # Shape: [B, num_bins]
-
-def compute_traffic_light_adherence_dep(
-    speed_bins,
-    scene_score_info,
-    stop_distance_from_trigger,
-    decel_min,
-    decel_max,
-):
-    """
-    Compute traffic light adherence scores based on scene information.
-    It considers the following:
-        - Traffic lights: similar to stop signs.
-    Args:
-        path: Tensor of shape [B, T, 2] - predicted future path.
-        speed: Tensor of shape [B] - current speed in m/s
-        scene_score_info: Tensor of shape [B] - scene information for the current step used to compute ground truth scores
-    """
-    rules_score_dict = {
-        "traffic_light": [1.0 for _ in speed_bins],
-    }
-    traffic_rules_info = scene_score_info.get("traffic_rules", {})
-    for tf_rule in traffic_rules_info:
-        if tf_rule["type"] == "traffic_light":
-            light_state = tf_rule["state"]  # 0: Red, 1:Yellow, 2:Green
-            light_distance = tf_rule["dist_to_trig"]  # in meters
-            # print(light_distance)
-            affects_ego = tf_rule["affects_ego"]
-            if light_state != 2 and affects_ego:
-                # print(f"Ego affected: {light_distance}")
                 for idx, bin_speed in enumerate(speed_bins):
                     if bin_speed < 1e-2:
-                        # 0 always ok
-                        rules_score_dict["traffic_light"][idx] = 1.0
+                        rules_score[idx] = 1.0
                         continue
                     required_decel = _required_decel_to_stop(
                         speed=bin_speed,
@@ -366,13 +326,13 @@ def compute_traffic_light_adherence_dep(
                         stop_distance_from_trigger=stop_distance_from_trigger,
                     )
                     if math.isinf(required_decel):
-                        # Already inside the stopping zone but still moving.
-                        rules_score_dict["traffic_light"][idx] = 0.0
+                        rules_score[idx] = 0.0
                     else:
-                        rules_score_dict["traffic_light"][idx] = _decel_to_score(required_decel, decel_min, decel_max)
-            # Otherwise: Green light, all speeds are fine
-    
-    return torch.tensor(list(rules_score_dict.values()))  # Shape: [3, num_classes]
+                        rules_score[idx] = _decel_to_score(required_decel, decel_min, decel_max)
+        all_scores.append(rules_score)
+    return torch.tensor(all_scores, dtype=torch.float32)  # Shape: [B, num_bins]
+
+
 
 def compute_stop_sign_adherence(
     speed_bins,
@@ -392,57 +352,13 @@ def compute_stop_sign_adherence(
         rules_score = [1.0 for _ in speed_bins]
         traffic_rules_info = scene_score_info[b].get("traffic_rules", {})
         for tf_rule in traffic_rules_info:
+            if isinstance(tf_rule["type"], list):
+                tf_rule["type"] = tf_rule["type"][0]  # Handle case where type is a list
             if tf_rule["type"] == "stop_sign":
                 distance = tf_rule["dist_to_trig"]  # in meters
-                affects_ego = tf_rule["affects_ego"]
-                if affects_ego:
-                    for idx, bin_speed in enumerate(speed_bins):
-                        if bin_speed < 1e-2:
-                            rules_score[idx] = 1.0
-                            continue
-                        required_decel = _required_decel_to_stop(
-                            speed=bin_speed,
-                            dist_to_trig=distance,
-                            stop_distance_from_trigger=stop_distance_from_trigger,
-                        )
-                        if math.isinf(required_decel):
-                            rules_score[idx] = 0.0
-                        else:
-                            rules_score[idx] = _decel_to_score(required_decel, decel_min, decel_max)
-        all_scores.append(rules_score)
-    return torch.tensor(all_scores, dtype=torch.float32)  # Shape: [B, num_bins]
-
-def compute_stop_sign_adherence_dep(
-    speed_bins,
-    scene_score_info,
-    stop_distance_from_trigger,
-    decel_min,
-    decel_max,
-):
-    """
-    Compute traffic rule adherence scores based on scene information.
-    It considers the following:
-        - Stop signs.
-    Args:
-        path: Tensor of shape [B, T, 2] - predicted future path.
-        speed: Tensor of shape [B] - current speed in m/s
-        scene_score_info: Tensor of shape [B] - scene information for the current step used to compute ground truth scores
-    """
-    rules_score_dict = {
-        "stop_sign": [1.0 for _ in speed_bins],
-    }
-    traffic_rules_info = scene_score_info.get("traffic_rules", {})
-    for tf_rule in traffic_rules_info:
-        if tf_rule["type"] == "stop_sign":
-            distance = tf_rule["dist_to_trig"]  # in meters
-            affects_ego = tf_rule["affects_ego"]
-
-            if affects_ego:
-                # print(f"Ego affected: {distance}")
                 for idx, bin_speed in enumerate(speed_bins):
                     if bin_speed < 1e-2:
-                        # 0 always ok
-                        rules_score_dict["stop_sign"][idx] = 1.0
+                        rules_score[idx] = 1.0
                         continue
                     required_decel = _required_decel_to_stop(
                         speed=bin_speed,
@@ -450,12 +366,11 @@ def compute_stop_sign_adherence_dep(
                         stop_distance_from_trigger=stop_distance_from_trigger,
                     )
                     if math.isinf(required_decel):
-                        rules_score_dict["stop_sign"][idx] = 0.0
+                        rules_score[idx] = 0.0
                     else:
-                        rules_score_dict["stop_sign"][idx] = _decel_to_score(required_decel, decel_min, decel_max)
-            # Otherwise: Green light, all speeds are fine
-    
-    return torch.tensor(list(rules_score_dict.values()))  # Shape: [3, num_classes]
+                        rules_score[idx] = _decel_to_score(required_decel, decel_min, decel_max)
+        all_scores.append(rules_score)
+    return torch.tensor(all_scores, dtype=torch.float32)  # Shape: [B, num_bins]
 
 def lateral_shift_paths(path):
     """
