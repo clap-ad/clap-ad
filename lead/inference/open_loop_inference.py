@@ -79,6 +79,7 @@ class OpenLoopInference:
         jt.Float[torch.Tensor, " 1 1"] | None,
         jt.Float[torch.Tensor, "1 num_speed_classes"] | None,
         jt.Float[torch.Tensor, "1 num_waypoints"] | None,
+        dict[str, jt.Float[torch.Tensor, "1 ..."] | None] | None, # Only for CLAPAD head
     ]:
         """Ensemble the outputs of the planning decoder from multiple models.
 
@@ -95,57 +96,80 @@ class OpenLoopInference:
         ) = pred_future_headings = None
 
         if self.config_training.use_planning_decoder:
-            if self.config_training.predict_target_speed:
-                pred_target_speed_logits = torch.stack(
-                    [pred.pred_target_speed_distribution[0] for pred in predictions],
-                ).mean(dim=0, keepdim=True)  # Average target speed logits.
+            if self.config_training.use_clapad_head:
+                pred_routes = []
+                for pred in predictions:
+                    route = pred.pred_clapad.get("sdc_traj")
+                    if route is not None:
+                        pred_routes.append(route[0])
+                pred_routes = torch.stack(pred_routes, dim=0).mean(dim=0, keepdim=True)
+                speed_logits = []
+                for pred in predictions:
+                    speed = pred.pred_clapad.get("speed_logits")
+                    if speed is not None:
+                        speed_logits.append(speed[0])
+                speed_logits = torch.stack(speed_logits, dim=0).mean(dim=0, keepdim=True)
 
-                pred_target_speed_distribution = F.softmax(
-                    pred_target_speed_logits,
-                    dim=-1,
-                )  # softmax probabilities.
-                pred_target_speed_scalar = decode_two_hot(
-                    pred_target_speed_distribution,
-                    self.config_training.target_speed_classes,
-                    self.device,
-                ).reshape(1, 1)  # Decode to scalar.
+                return(
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    {"sdc_traj": pred_routes, "speed_logits": speed_logits}
+                )
+            else:
+                if self.config_training.predict_target_speed:
+                    pred_target_speed_logits = torch.stack(
+                        [pred.pred_target_speed_distribution[0] for pred in predictions]
+                    ).mean(dim=0, keepdim=True)  # Average target speed logits.
+
+                    pred_target_speed_distribution = F.softmax(
+                        pred_target_speed_logits, dim=-1
+                    )  # softmax probabilities.
+                    pred_target_speed_scalar = decode_two_hot(
+                        pred_target_speed_distribution,
+                        self.config_training.target_speed_classes,
+                        self.device,
+                    ).reshape(1, 1)  # Decode to scalar.
+                    if (
+                        pred_target_speed_distribution[0, 0]
+                        > self.config_open_loop.brake_threshold
+                    ):  # Brake if we are confident enough.
+                        pred_target_speed_scalar = torch.Tensor([0.0]).reshape(1, -1)
+                    if (
+                        self.config_open_loop.lower_target_speed
+                    ):  # Optionally lower the target speed.
+                        pred_target_speed_scalar *= (
+                            self.config_open_loop.lower_target_speed_factor
+                        )
+
+                if self.config_training.predict_temporal_spatial_waypoints:
+                    pred_future_waypoints = torch.stack(
+                        [pred.pred_future_waypoints[0] for pred in predictions]
+                    ).mean(dim=0, keepdim=True)  # Average waypoints.
+
+                if self.config_training.predict_spatial_path:
+                    pred_routes = torch.stack(
+                        [pred.pred_route[0] for pred in predictions]
+                    ).mean(dim=0, keepdim=True)  # Average route.
+
                 if (
-                    pred_target_speed_distribution[0, 0]
-                    > self.config_open_loop.brake_threshold
-                ):  # Brake if we are confident enough.
-                    pred_target_speed_scalar = torch.Tensor([0.0]).reshape(1, -1)
-                if (
-                    self.config_open_loop.lower_target_speed
-                ):  # Optionally lower the target speed.
-                    pred_target_speed_scalar *= (
-                        self.config_open_loop.lower_target_speed_factor
-                    )
+                    self.config_training.use_navsim_data
+                    and predictions[0].pred_headings is not None
+                ):
+                    pred_future_headings = torch.stack(
+                        [pred.pred_headings[0] for pred in predictions]
+                    ).mean(dim=0, keepdim=True)  # Average headings.
 
-            if self.config_training.predict_temporal_spatial_waypoints:
-                pred_future_waypoints = torch.stack(
-                    [pred.pred_future_waypoints[0] for pred in predictions],
-                ).mean(dim=0, keepdim=True)  # Average waypoints.
-
-            if self.config_training.predict_spatial_path:
-                pred_routes = torch.stack(
-                    [pred.pred_route[0] for pred in predictions],
-                ).mean(dim=0, keepdim=True)  # Average route.
-
-            if (
-                self.config_training.use_navsim_data
-                and predictions[0].pred_headings is not None
-            ):
-                pred_future_headings = torch.stack(
-                    [pred.pred_headings[0] for pred in predictions],
-                ).mean(dim=0, keepdim=True)  # Average headings.
-
-        return (
-            pred_routes,
-            pred_future_waypoints,
-            pred_target_speed_scalar,
-            pred_target_speed_distribution,
-            pred_future_headings,
-        )
+            return (
+                pred_routes,
+                pred_future_waypoints,
+                pred_target_speed_scalar,
+                pred_target_speed_distribution,
+                pred_future_headings,
+                None
+            )
 
     @beartype
     def ensemble_bounding_boxes(
@@ -327,14 +351,15 @@ class OpenLoopInference:
             pred_depth = self.ensemble_depth(predictions)
 
         # Planning
-        (
-            pred_route,
-            pred_future_waypoints,
-            pred_target_speed_scalar,
-            pred_target_speed_distribution,
-            pred_future_headings,
-        ) = self.ensemble_planning_decoder(predictions)
-
+        planning_output_tuple = self.ensemble_planning_decoder(predictions)
+            
+        pred_route = planning_output_tuple[0]
+        pred_future_waypoints = planning_output_tuple[1]
+        pred_target_speed_scalar = planning_output_tuple[2]
+        pred_target_speed_distribution = planning_output_tuple[3]
+        pred_future_headings = planning_output_tuple[4]
+        pred_clapad_route = planning_output_tuple[5]
+           
         return OpenLoopPrediction(
             pred_future_waypoints=pred_future_waypoints,
             pred_target_speed_scalar=pred_target_speed_scalar,
@@ -347,6 +372,7 @@ class OpenLoopInference:
             pred_bounding_box_vehicle_system=pred_bounding_boxes_vehicle_system,
             pred_bounding_box_image_system=pred_bounding_boxes_image_system,
             pred_radar_predictions=None,
+            pred_clapad=pred_clapad_route
         )
 
     @beartype
@@ -394,3 +420,4 @@ class OpenLoopPrediction:
     pred_bounding_box_vehicle_system: list[PredictedBoundingBox] | None
     pred_bounding_box_image_system: list[PredictedBoundingBox] | None
     pred_radar_predictions: None
+    pred_clapad: dict[str, jt.Float[torch.Tensor, "bs ..."] | None] | None

@@ -4,6 +4,7 @@ from copy import deepcopy
 
 import cv2
 import matplotlib.pyplot as plt
+from lead.tfv6.planning_head_clapad import SpeedScoringLoss
 import numpy as np
 import torch
 import wandb
@@ -141,8 +142,11 @@ class Visualizer:
         self._bev_semantic(ground_truth=False)
         self._target_point()
         if self.config.use_planning_decoder:
-            self._pred_future_waypoints()
-            self._pred_route()
+            if self.config.use_clapad_head:
+                self._pred_route_clap()
+            else:
+                self._pred_future_waypoints()
+                self._pred_route()
         self._ego_bounding_box()
         self._pred_bounding_box()
         self._target_point()
@@ -152,6 +156,9 @@ class Visualizer:
 
         # Text
         self._meta()
+        if self.config.use_planning_decoder and self.config.use_clapad_head:
+            self._gt_speed_logits_clap()
+            self._pred_speed_logits_clap()
 
         # Concatenate
         return self._concatenate_all_perspectives_and_bev()
@@ -676,6 +683,24 @@ class Visualizer:
             )
 
         ret = np.concatenate((top_border, ret, bottom_border), axis=0)
+        # If self.barplot exists, concatenate it at the bottom
+        # If self.barplot exists, concatenate it at the bottom
+        if hasattr(self, "barplot") and self.barplot is not None:
+            barplot_img = self.barplot
+            # Resize barplot to the full width of the main image and double its height
+            target_width = ret.shape[1]
+            target_height = barplot_img.shape[0]
+            if barplot_img.shape[1] != target_width or barplot_img.shape[0] != target_height:
+                barplot_img = cv2.resize(barplot_img, (target_width, target_height))
+            # No padding needed, just concatenate
+            ret = np.concatenate((ret, barplot_img), axis=0)
+        if hasattr(self, "barplot_gt") and self.barplot_gt is not None:
+            barplot_gt_img = self.barplot_gt
+            target_width = ret.shape[1]
+            target_height = barplot_gt_img.shape[0]
+            if barplot_gt_img.shape[1] != target_width or barplot_gt_img.shape[0] != target_height:
+                barplot_gt_img = cv2.resize(barplot_gt_img, (target_width, target_height))
+            ret = np.concatenate((ret, barplot_gt_img), axis=0)
 
         # Concatenate meta panel at the bottom (commented out in original)
         meta_panel = np.ascontiguousarray(self.meta_panel, dtype=np.uint8)
@@ -698,7 +723,6 @@ class Visualizer:
             )
 
         ret = np.concatenate((ret, meta_top_border, meta_panel_resized), axis=0)
-
         return ret
 
     def _bev_semantic(self, ground_truth=False):
@@ -960,6 +984,66 @@ class Visualizer:
                     thickness=-1,
                 )
             # self._draw_points_in_perspective(points=wps, size=3, connected=True, color=constants.PREDICTION_ROUTE_COLOR)
+    def _pred_route_clap(self):
+        pred_route_clap = self.predictions.pred_clapad["sdc_traj"]
+        if pred_route_clap is not None:
+            wps = pred_route_clap.detach().cpu().float().numpy()[0]
+            for i in range(len(wps) - 1):
+                x1 = int(wps[i][0] * self.loc_pixels_per_meter + self.origin[0])
+                y1 = int(wps[i][1] * self.loc_pixels_per_meter + self.origin[1])
+                color = viz_utils.lighter_shade(
+                    constants.PREDICTION_ROUTE_COLOR, i, len(wps)
+                )
+                cv2.circle(
+                    self.bev_image,
+                    (x1, y1),
+                    radius=constants.PREDICTION_ROUTE_RADIUS,
+                    color=color,
+                    thickness=-1,
+                )
+    def _pred_speed_logits_clap(self):
+        pred_speed_logits_clap = self.predictions.pred_clapad["speed_logits"]
+        if pred_speed_logits_clap is not None:
+            sp_logits = pred_speed_logits_clap.detach().cpu().float().numpy()[0] # (5, 3, 7)
+            sp_logits = sp_logits[0]  # Select score for the non-aug traj (3, 7)
+            # Apply normalization
+            sp_logits  = 1 / (1 + np.exp(-sp_logits))
+            # Assume speed_bins are available in config or constants
+            speed_bins =[0, 2.5, 5, 7, 8.5, 10, 12]
+            # Draw the bar plot as an image
+            bar_img = draw_speed_scores_append_bottom(self.bev_image, sp_logits, speed_bins)
+            self.barplot = bar_img
+
+    def _gt_speed_logits_clap(self):
+        """Visualize ground truth speed logits given models predicted path."""
+        speed_bins =[0, 2.5, 5, 7, 8.5, 10, 12]
+        ttc_time_horizon = 1.0  # seconds
+        self.loss_speed = SpeedScoringLoss(
+            speed_bins=speed_bins,
+            crt_cfg_dict={
+                "ttc_cfg":{
+                    "time_horizon": ttc_time_horizon,
+                    "coll_radius": 0.1,
+                    "safe_distance": 1.0
+                },
+                "traffic_rule_cfg":{
+                    "speed_thresh":0.1,
+                    "light_stop_thresh": 5.0,
+                    "light_slow_thresh": 20.0,
+                    "stop_sign_stop_thresh": 3.0,
+                    "stop_sign_slow_thresh": 18.0,
+                },
+            },
+        )
+        curr_speed = self.data.get("speed")[0]
+        path_pred = self.predictions.pred_clapad["sdc_traj"]
+        scores_pred = self.predictions.pred_clapad["speed_logits"][:,0:1]
+        scene_score_info = [self.data.get("scene_score_info")]
+        loss = self.loss_speed(curr_speed, path_pred, scores_pred, scene_score_info, debug=True)
+        scores_gt = torch.stack(list(loss["raw_scores"].values())).squeeze().cpu().float().numpy()  # (3, 7)
+        bar_img = draw_speed_scores_append_bottom(self.bev_image, scores_gt, speed_bins, 
+                                                  title="GT Speed Scores")
+        self.barplot_gt = bar_img
 
     def _pred_future_waypoints(self):
         pred_waypoints = self.predictions.pred_future_waypoints
@@ -1649,3 +1733,116 @@ def visualize_feature_maps(
         buf.close()
 
     plt.close()
+
+def draw_speed_scores_append_bottom(image, sp_logits, speed_bins, incl_gt_score=False, stop_completed=False, title="Speed Logits over Bins"):
+    """
+    Draws a bar plot of speed logits over bins and appends it to the bottom of the provided image.
+    Returns an RGB numpy array compatible with OpenCV and the rest of the visualization stack.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import cv2
+
+    bins = np.array(speed_bins)
+
+    # Only draw the bar plot (no image subplot)
+    fig, ax_bar = plt.subplots(figsize=(image.shape[1] / 100, 2.5))  # width in inches
+    bar_width = 0.3
+    ax_bar.bar(bins - bar_width, sp_logits[0], width=bar_width, label='TTC')
+    ax_bar.bar(bins, sp_logits[1], width=bar_width, label='Traffic Light')
+    stop_label = 'Stop Sign (ignored)' if stop_completed else 'Stop Sign'
+    stop_color = '0.75' if stop_completed else None
+    stop_alpha = 0.6 if stop_completed else 1.0
+    ax_bar.bar(
+        bins + bar_width,
+        sp_logits[2],
+        width=bar_width,
+        label=stop_label,
+        color=stop_color,
+        alpha=stop_alpha,
+    )
+    ax_bar.set_xlabel('Speed Bin')
+    ax_bar.set_ylabel('Score')
+    ax_bar.legend()
+    ax_bar.set_xticks(bins)
+    ax_bar.set_title(title)
+    plt.tight_layout()
+
+    # Convert bar plot to numpy array (ARGB to RGB)
+    fig.canvas.draw()
+    w, h = fig.canvas.get_width_height()
+    buf = np.frombuffer(fig.canvas.tostring_argb(), dtype=np.uint8)
+    buf = buf.reshape(h, w, 4)
+    bar_img = buf[:, :, 1:4]  # Drop alpha channel, keep RGB
+
+    plt.close(fig)
+
+    # Resize bar_img to match image width
+    img_width = image.shape[1]
+    bar_img_resized = cv2.resize(bar_img, (img_width, bar_img.shape[0]))
+    return bar_img_resized
+
+def draw_speed_scores(image, sp_logits, speed_bins, incl_gt_score=False, stop_completed=False):
+    """
+    Draws a bar plot of speed logits over bins and overlays it on the provided image.
+    Returns an RGB numpy array compatible with OpenCV and the rest of the visualization stack.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import cv2
+
+    bins = np.array(speed_bins)
+
+    # Plot image and bar plots
+    if not incl_gt_score:
+        fig = plt.figure(figsize=(10, 7))
+        gs = fig.add_gridspec(2, 1, height_ratios=[5, 2])
+
+        # Image subplot
+        ax_img = fig.add_subplot(gs[0])
+        # Ensure image is RGB and uint8
+        img_rgb = image
+        if img_rgb.dtype != np.uint8:
+            img_rgb = (255 * (img_rgb / img_rgb.max())).astype(np.uint8)
+        if img_rgb.ndim == 2:
+            img_rgb = cv2.cvtColor(img_rgb, cv2.COLOR_GRAY2RGB)
+        elif img_rgb.shape[2] == 4:
+            img_rgb = cv2.cvtColor(img_rgb, cv2.COLOR_BGRA2RGB)
+        ax_img.imshow(img_rgb)
+        ax_img.axis('off')
+
+        # Bar plot subplot
+        ax_bar = fig.add_subplot(gs[1])
+        bar_width = 0.3
+        ax_bar.bar(bins - bar_width, sp_logits[0], width=bar_width, label='TTC')
+        ax_bar.bar(bins, sp_logits[1], width=bar_width, label='Traffic Light')
+        stop_label = 'Stop Sign (ignored)' if stop_completed else 'Stop Sign'
+        stop_color = '0.75' if stop_completed else None
+        stop_alpha = 0.6 if stop_completed else 1.0
+        ax_bar.bar(
+            bins + bar_width,
+            sp_logits[2],
+            width=bar_width,
+            label=stop_label,
+            color=stop_color,
+            alpha=stop_alpha,
+        )
+        ax_bar.set_xlabel('Speed Bin')
+        ax_bar.set_ylabel('Score')
+        ax_bar.legend()
+        ax_bar.set_xticks(bins)
+        ax_bar.set_title('Speed Logits over Bins')
+    else:
+        raise NotImplementedError("Including GT score in the plot is not implemented yet.")
+
+    plt.tight_layout()
+
+    # Convert figure to numpy array (ARGB to RGB)
+    fig.canvas.draw()
+    w, h = fig.canvas.get_width_height()
+    buf = np.frombuffer(fig.canvas.tostring_argb(), dtype=np.uint8)
+    buf = buf.reshape(h, w, 4)
+    img = buf[:, :, 1:4]  # Drop alpha channel, keep RGB
+
+    plt.close(fig)
+    return img
