@@ -274,7 +274,7 @@ class TrainingConfig(BaseConfig):
         """Batch size for training."""
         if self.debug_mode:
             return 2
-        return 64
+        return 512
 
     @property
     def torch_float_type(self):
