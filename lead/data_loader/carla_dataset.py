@@ -729,6 +729,10 @@ class CARLAData(Dataset):
                         },
                         ...
                     ]
+        - Note about coordinate system:
+            In lead data, coordinates are following carla system, where x is forward and y is right.
+            Have a look at this issue for more info https://github.com/kesai-labs/lead/issues/60
+            Waypoints and routes are as well in carla coordinate system, so the future waypoints are in carla coordinate system.
         """
         # ------ Third
         # Those who should be regarded in TTC calculations
@@ -764,15 +768,16 @@ class CARLAData(Dataset):
         # Traffic Rules
         tf_list = []
         for box in rel_boxes:
-            x, y, w, h, yaw, vx, vy, cls = box
+            x, y, h, w, yaw, vx, vy, cls = box
+
             obj_name = class_names[int(cls)]
             if obj_name == tf_light_obj:
-                # convert to ego frame (same transform you used before)
-                long_dist = x     # forward
-                lat_dist = y      # left
+                # convert to ego frame
+                long_dist = np.abs(x)     # forward
+                lat_dist = np.abs(y)      # left
                 dist = np.linalg.norm([x, y])
                 entry = {
-                    "type": obj_name,
+                    "type": obj_name.lower(),
                     "dist_to_trig": dist,
                     # "affects_ego": tf_rule["affects_ego"],
                     # "id": tf_rule["id"],
@@ -781,11 +786,11 @@ class CARLAData(Dataset):
                 }
                 tf_list.append(entry)
             elif obj_name == stop_sign_obj:
-                long_dist = x     # forward
-                lat_dist = y      # left
+                long_dist = np.abs(x)     # forward
+                lat_dist = np.abs(y)      # left
                 dist = np.linalg.norm([x, y])
                 entry = {
-                    "type": obj_name,
+                    "type": obj_name.lower(),
                     "dist_to_trig": dist,
                     # "affects_ego": tf_rule["affects_ego"],
                     # "id": tf_rule["id"],
@@ -794,12 +799,12 @@ class CARLAData(Dataset):
                 }
                 tf_list.append(entry)
             else:
-                # current position (already ego-relative)
+                # current position
                 p_now = np.array([x, y])
                 # future position (constant velocity)
                 p_fut = p_now + np.array([vx, vy]) * self.ttc_time_horizon
                 obj_dict = {
-                    "type": obj_name,
+                    "type": obj_name.lower(),
                     "p_o_x": x,
                     "p_o_y": y,
                     "p_o_x_fut": p_fut[0],
@@ -807,7 +812,7 @@ class CARLAData(Dataset):
                     "vx": vx,
                     "vy": vy,
                     "yaw": yaw,
-                    "bbox": [w, h],
+                    "bbox": [w.item()*2, h.item()*2],
                     "ttc_cal": obj_name in ttc_dynamic_obj
                 }
                 obj_list.append(obj_dict)
@@ -1374,7 +1379,7 @@ def get_rel_bbox(data, min_x_meter, max_x_meter, pixels_per_meter):
 
         # BEV usually: x forward, y left (check sign if needed)
         x_rel = dx
-        y_rel = -dy
+        y_rel = dy
         yaw = -yaw
 
         # --- velocity ---
@@ -1407,7 +1412,8 @@ def vis_ttc_debug_full(data, scene_dict, save_path="ttc_debug_full.png"):
     fig, axs = plt.subplots(1, 3, figsize=(18, 6))
 
     def to_plot_frame(x, y):
-        return -y, x  # forward = up
+        # return -y, x  # forward = up
+        return x, y  # forward = up
 
     # ======================
     # 🟩 BEV

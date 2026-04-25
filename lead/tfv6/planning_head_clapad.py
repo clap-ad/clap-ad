@@ -464,7 +464,7 @@ class SpeedScoringLoss(nn.Module):
             # "speed_limit": 0.3,
         }
 
-    def forward(self, curr_speed, path_pred, scores_pred, scene_score_info, path_pred_augmented=None):
+    def forward(self, curr_speed, path_pred, scores_pred, scene_score_info, path_pred_augmented=None, debug=False):
         """
         Args:
             current_speed: Tensor of shape [B] - current speed in m/s
@@ -473,6 +473,7 @@ class SpeedScoringLoss(nn.Module):
                 - B: Batch size, K: Number of augmented paths, H: Number of heads, S_CLS: Number of speed classes
             scene_score_info: Tensor of shape [B] - scene information for the current step used to compute ground truth scores
             path_pred_augmented: Tensor of shape [B, K, T, 2] - augmented predicted future path
+            debug: If True, returns raw scores for debugging purposes next to loss
         Returns:
             loss: Scalar tensor
         """
@@ -552,6 +553,7 @@ class SpeedScoringLoss(nn.Module):
             total_loss += weighted_loss
 
         losses["loss_speed_scores"] = total_loss # "loss" should be in the name if intended to be backpropagated
-        # losses["raw_scores"] = raw_scores
+        if debug:
+            losses["raw_scores"] = raw_scores
 
         return losses
