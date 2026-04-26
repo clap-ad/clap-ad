@@ -1400,10 +1400,10 @@ def get_rel_bbox(data, min_x_meter, max_x_meter, pixels_per_meter):
         dx = (cx - ego_px) / pixels_per_meter
         dy = (cy - ego_py) / pixels_per_meter
 
-        # BEV usually: x forward, y left (check sign if needed)
+        # BEV usually: x forward, y right
         x_rel = dx
         y_rel = dy
-        yaw = -yaw
+        yaw = yaw
 
         # --- velocity ---
         # if len(box) >= 7:
@@ -1435,8 +1435,8 @@ def vis_ttc_debug_full(data, scene_dict, save_path="ttc_debug_full.png"):
     fig, axs = plt.subplots(1, 3, figsize=(18, 6))
 
     def to_plot_frame(x, y):
-        # return -y, x  # forward = up
-        return x, y  # forward = up
+        return y, x  # forward = up
+        # return x, y  # forward = up
 
     # ======================
     # 🟩 BEV
