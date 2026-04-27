@@ -138,10 +138,7 @@ class PlanningHeadClap(nn.Module):
                 },
                 "traffic_rule_cfg":{
                     "speed_thresh":0.1,
-                    "light_stop_thresh": 5.0,
-                    "light_slow_thresh": 20.0,
-                    "stop_sign_stop_thresh": 3.0,
-                    "stop_sign_slow_thresh": 18.0,
+                    "ss_stop_distance": 0.0
                 },
             },
         )
