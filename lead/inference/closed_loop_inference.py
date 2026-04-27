@@ -72,6 +72,9 @@ class ClosedLoopInference(OpenLoopInference):
         )
 
         self.step = 4  # Constant so produced images start with 5, not really important
+        self.speed_bins=[0, 2.5, 5, 7, 8.5, 10, 12] # speed bins for the speed head
+        self.stop_completed = False
+        self.stop_wait_count = 0
 
     @jt.jaxtyped(typechecker=beartype)
     def execute_route_and_target_speed(
@@ -190,6 +193,102 @@ class ClosedLoopInference(OpenLoopInference):
         steer = np.clip(steer, -1.0, 1.0)  # Valid steering values are in [-1,1]
         return float(steer), float(throttle), float(brake)
 
+
+    @jt.jaxtyped(typechecker=beartype)
+    def execute_route_and_best_speed(
+        self,
+        pred_checkpoints: jt.Float[torch.Tensor, "1 num_checkpoints 2"],
+        pred_speed_logits: jt.Float[torch.Tensor, "1 5 3 7"],
+        speed: jt.Float[torch.Tensor, "1 1"],
+        ego_vehicle_location: float = 0.0,
+        ego_vehicle_rotation: float = 0.0,
+    ) -> tuple[float, float, float]:
+        """Predicts vehicle control with a PID controller. Use route and speed scores.
+
+        Args:
+            pred_checkpoints: Predicted route checkpoints in ego-vehicle coordinates. [B, T, 2]
+            pred_speed_logits: Predicted speed scores for pre-defined speed bins. [B, NUM_PATH, NUM_MODE, NUM_SPEED_BINS]
+            speed: Current speed of the vehicle in m/s.
+            ego_vehicle_location: Current lateral location of the ego vehicle.
+            ego_vehicle_rotation: Current rotation of the ego vehicle.
+        Returns:
+            steer: Steering command in [-1, 1]
+            throttle: Throttle command in [0, 1]
+            brake: Brake command in [0, 1]
+        """
+        def get_desired_speed_from_scores(pred_speed_scores, threshold=0.3):
+            # Find bins where all criteria have non-zero scores
+            valid_bins = np.all(pred_speed_scores > threshold, axis=0)  # shape: [S], True if all criteria > 0
+            # Choose the largest bin index that is valid
+            if np.any(valid_bins):
+                valid_candidates = np.where(valid_bins)[0]
+                # best_speed_bin_idx = int(np.median(valid_candidates))
+                # best_speed_bin_idx = int(np.max(valid_candidates))
+                best_speed_bin_idx = int(np.percentile(valid_candidates, 50, interpolation='higher'))
+            else:
+                # Fallback: choose the bin with the highest overall score
+                # overall_scores = np.sum(first_path_scores, axis=0)
+                # best_speed_bin_idx = np.argmax(overall_scores)
+                best_speed_bin_idx = 0
+            target_speed = self.speed_bins[best_speed_bin_idx]
+            return target_speed
+        
+        def stop_sign_controller():
+            """Looks at pred scores to check whether a stop sign has been detected.
+            It handles the temporal aspect of stop signs and overwrites predictions if necessary."""
+            stop_scores = pred_speed_scores[2:3]
+
+            # speed bin 2.5m/s is too noisy, therefore we ignore it in the stop sign controller
+            # stop_scores[:, 1] = 0.0
+
+            stop_target = get_desired_speed_from_scores(stop_scores)
+            
+            if stop_target > 0 and speed > 2.0:
+                # If stop sign is not detected, reset stop completed status
+                self.stop_completed = False
+                self.stop_wait_count = 0
+            if self.stop_completed:
+                # overwrite scores when stop is completed
+                pred_speed_scores[2:3] = np.ones_like(stop_scores)
+                return pred_speed_scores
+            
+            if stop_target == 0 and speed < 0.01:
+                # If stop sign is detected and we are stopped, wait 1 second (20 frames)
+                self.stop_wait_count += 1
+                if self.stop_wait_count >= 20:
+                    self.stop_completed = True
+            else:
+                self.stop_wait_count = 0
+
+            return pred_speed_scores
+        
+        pred_checkpoints = pred_checkpoints[0].data.cpu().float().numpy()
+        speed = float(speed[0].data.cpu().float().numpy())
+        pred_speed_logits = pred_speed_logits.cpu().float().numpy()
+        pred_speed_logits = pred_speed_logits[0][0] # .float()  # shape: [M, S], M=criteria, S=speed bins
+        pred_speed_scores = 1 / (1 + np.exp(-pred_speed_logits))
+        stop_sign_controller()
+        pred_target_speed = get_desired_speed_from_scores(pred_speed_scores)
+
+
+        brake = bool(
+            pred_target_speed < 0.01
+            or (speed / pred_target_speed) > self.config_closed_loop.brake_ratio
+        )
+        steer = self.lateral_route_controller.step(
+            pred_checkpoints,
+            speed,
+            ego_vehicle_location,
+            ego_vehicle_rotation,
+            sensor_agent_steer_correction=self.config_closed_loop.sensor_agent_steer_correction,
+        )
+        pred_target_speed = float(pred_target_speed)
+        throttle, brake = get_throttle(
+            brake, pred_target_speed, speed, self.config_expert
+        )
+
+        return steer, throttle, float(brake)  
+
     @beartype
     def ensemble(
         self,
@@ -226,34 +325,50 @@ class ClosedLoopInference(OpenLoopInference):
                     ego_speed,
                 )
             )
-
-        # Select which high-level modality we want to use for each control
-        if self.config_closed_loop.steer_modality == "route":
+        
+        if open_loop_prediction.pred_clapad is not None: # CLAP-AD control logic
+            pred_route = open_loop_prediction.pred_clapad["sdc_traj"]
+            speed_scores =  open_loop_prediction.pred_clapad["speed_logits"]
+            route_steer, target_speed_throttle, target_speed_brake = (
+                self.execute_route_and_best_speed(
+                    pred_route,
+                    speed_scores,
+                    ego_speed,
+                )
+            )
             steer = route_steer
-        elif self.config_closed_loop.steer_modality == "waypoint":
-            steer = waypoints_steer
-        else:
-            raise ValueError(
-                f"Invalid steer_modality: {self.config_closed_loop.steer_modality}",
-            )
-
-        if self.config_closed_loop.throttle_modality == "target_speed":
             throttle = target_speed_throttle
-        elif self.config_closed_loop.throttle_modality == "waypoint":
-            throttle = waypoints_throttle
-        else:
-            raise ValueError(
-                f"Invalid throttle_modality: {self.config_closed_loop.throttle_modality}",
-            )
-
-        if self.config_closed_loop.brake_modality == "target_speed":
             brake = target_speed_brake
-        elif self.config_closed_loop.brake_modality == "waypoint":
-            brake = waypoints_brake
-        else:
-            raise ValueError(
-                f"Invalid brake_modality: {self.config_closed_loop.brake_modality}",
-            )
+            open_loop_prediction.pred_route = pred_route # for later closed-loop post-processings
+
+        else: # Normal TFV6 control logic
+            # Select which high-level modality we want to use for each control
+            if self.config_closed_loop.steer_modality == "route":
+                steer = route_steer
+            elif self.config_closed_loop.steer_modality == "waypoint":
+                steer = waypoints_steer
+            else:
+                raise ValueError(
+                    f"Invalid steer_modality: {self.config_closed_loop.steer_modality}"
+                )
+
+            if self.config_closed_loop.throttle_modality == "target_speed":
+                throttle = target_speed_throttle
+            elif self.config_closed_loop.throttle_modality == "waypoint":
+                throttle = waypoints_throttle
+            else:
+                raise ValueError(
+                    f"Invalid throttle_modality: {self.config_closed_loop.throttle_modality}"
+                )
+
+            if self.config_closed_loop.brake_modality == "target_speed":
+                brake = target_speed_brake
+            elif self.config_closed_loop.brake_modality == "waypoint":
+                brake = waypoints_brake
+            else:
+                raise ValueError(
+                    f"Invalid brake_modality: {self.config_closed_loop.brake_modality}"
+                )
 
         # Turn off throttle if we brake
         if brake > 0.0:

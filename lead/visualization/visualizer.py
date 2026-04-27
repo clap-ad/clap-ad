@@ -181,6 +181,8 @@ class Visualizer:
 
         # Text
         self._meta()
+        if self.config.use_planning_decoder and self.config.use_clapad_head:
+            self._pred_speed_logits_clap()
 
         return self._concatenate_all_perspectives_and_bev()
 
