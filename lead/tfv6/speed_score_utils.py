@@ -118,7 +118,8 @@ def _compute_ttc_for_bin(
                 p_o_now=p_o,
                 p_o_future=p_o_future,
                 ego_wl=ego_wl,
-                obj_wl=obj_wl
+                obj_wl=obj_wl,
+                steps=20
             )
             if dist_future < min_distance:
                 threat_actor = actor
