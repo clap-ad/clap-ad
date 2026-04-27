@@ -30,9 +30,10 @@ from srunner.scenariomanager.watchdog import Watchdog
 from leaderboard.scenarios.scenario_manager import ScenarioManager
 from leaderboard.scenarios.route_scenario import RouteScenario
 from leaderboard.envs.sensor_interface import SensorConfigurationInvalid
-from leaderboard.autoagents.agent_wrapper import AgentError, AgentWrapperFactory, validate_sensor_configuration, TickRuntimeError
+from leaderboard.autoagents.agent_wrapper import AgentError, validate_sensor_configuration, TickRuntimeError
 from leaderboard.utils.statistics_manager import StatisticsManager, FAILURE_MESSAGES
 from leaderboard.utils.route_indexer import RouteIndexer
+from leaderboard.utils.route_pool import RoutePool
 import atexit
 import subprocess
 import time
@@ -574,43 +575,83 @@ class LeaderboardEvaluator(object):
         """
         Run the challenge mode
         """
-        
-        route_indexer = RouteIndexer(
-            routes_file=args.routes, 
-            repetitions=args.repetitions, 
-            routes_subset=args.routes_subset,
-            keep_repetition_order=True,
-            local_rank=self.rank,
-            world_size=self.world_size
-        )
 
-        if args.resume:
-            resume = route_indexer.validate_and_resume(args.checkpoint)
-        else:
-            resume = False
+        if self.world_size > 1:
+            # Multi-GPU: use shared route pool so any rank can pick any route
+            pool_dir = os.path.dirname(self.statistics_manager._endpoint)
+            pool_path = os.path.join(pool_dir, '.route_pool.json')
+            route_pool = RoutePool(
+                pool_path=pool_path,
+                routes_file=args.routes,
+                repetitions=args.repetitions,
+                routes_subset=args.routes_subset,
+                rank=self.rank,
+                world_size=self.world_size,
+            )
 
-        if resume:
-            self.statistics_manager.add_file_records(args.checkpoint)
-        else:
             self.statistics_manager.clear_records()
-        self.statistics_manager.save_progress(route_indexer.index, route_indexer.total)
-        self.statistics_manager.write_statistics()
+            self.statistics_manager.save_progress(0, route_pool.total_routes)
+            self.statistics_manager.write_statistics()
 
-        crashed = False
-        t1 = time.time()
-        while route_indexer.peek() and not crashed:
+            crashed = False
+            t1 = time.time()
+            while not crashed:
+                config = route_pool.acquire_next(current_town=self.last_town)
+                if config is None:
+                    break
 
-            # Run the scenario
-            config = route_indexer.get_next_config()
-            crashed = self._load_and_run_scenario(args, config)
-            print(crashed, flush=True)
-            # Save the progress and write the route statistics
+                crashed = self._load_and_run_scenario(args, config)
+                print(crashed, flush=True)
+
+                if not crashed:
+                    route_pool.mark_done(config)
+
+                # Save per-rank progress and merge
+                self.statistics_manager.save_progress(route_pool._local_index, route_pool.total_routes)
+                self.statistics_manager.write_statistics()
+                self._merge_rank_results()
+
+                if crashed:
+                    print(f'[Rank {self.rank}] Route crashed, please restart', flush=True)
+                    break
+        else:
+            # Single-GPU: use the original RouteIndexer
+            route_indexer = RouteIndexer(
+                routes_file=args.routes,
+                repetitions=args.repetitions,
+                routes_subset=args.routes_subset,
+                keep_repetition_order=True,
+                local_rank=self.rank,
+                world_size=self.world_size
+            )
+
+            if args.resume:
+                resume = route_indexer.validate_and_resume(args.checkpoint)
+            else:
+                resume = False
+
+            if resume:
+                self.statistics_manager.add_file_records(args.checkpoint)
+            else:
+                self.statistics_manager.clear_records()
             self.statistics_manager.save_progress(route_indexer.index, route_indexer.total)
             self.statistics_manager.write_statistics()
-            self._merge_rank_results()
-            if crashed:
-                print(f'{route_indexer.index} crash, [{route_indexer.index}/{route_indexer.total}], please restart', flush=True)
-                break
+
+            crashed = False
+            t1 = time.time()
+            while route_indexer.peek() and not crashed:
+
+                # Run the scenario
+                config = route_indexer.get_next_config()
+                crashed = self._load_and_run_scenario(args, config)
+                print(crashed, flush=True)
+                # Save the progress and write the route statistics
+                self.statistics_manager.save_progress(route_indexer.index, route_indexer.total)
+                self.statistics_manager.write_statistics()
+                self._merge_rank_results()
+                if crashed:
+                    print(f'{route_indexer.index} crash, [{route_indexer.index}/{route_indexer.total}], please restart', flush=True)
+                    break
 
         # Shutdown ROS1 bridge server if necessary
         if self._ros1_server is not None:
