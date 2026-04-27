@@ -215,6 +215,8 @@ class TrainingConfig(BaseConfig):
     # Root directory for CARLA sensor data.
     # carla_root = "/workspace/lead/data/carla_leaderboard2"
     carla_root = "/data/datasets/AD_datasets/lead_carla/data/carla_leaderboard2"
+    # carla_root = "/workspace/lead/data/carla_leaderboard2"
+    carla_root = "/data/datasets/AD_datasets/lead_carla/data/carla_leaderboard2"
 
     @property
     def carla_data(self):
@@ -276,6 +278,7 @@ class TrainingConfig(BaseConfig):
         """Batch size for training."""
         if self.debug_mode:
             return 2
+        return 512
         return 512
 
     @property
@@ -675,9 +678,13 @@ class TrainingConfig(BaseConfig):
 
     # If true model will use the planning decoder.
     use_planning_decoder = True
+    use_planning_decoder = True
 
     # If true will use TFv5's planning decoder
     use_tfv5_planning_decoder = False
+
+    # Use CLAP-AD head
+    use_clapad_head = True
 
     # Use CLAP-AD head
     use_clapad_head = True
@@ -710,8 +717,11 @@ class TrainingConfig(BaseConfig):
     # Number of route checkpoints to predict. Needs to be smaller than num_route_points_smoothing!
     # num_route_points_prediction = 10
     num_route_points_prediction = 12
+    # num_route_points_prediction = 10
+    num_route_points_prediction = 12
     # Assume maximum distance between two future waypoints in meters.
     max_distance_future_waypoint = 10.0
+    target_first_distance = 1.0 #. 1 meters between waypoints
     target_first_distance = 1.0 #. 1 meters between waypoints
 
     @property
@@ -991,6 +1001,14 @@ class TrainingConfig(BaseConfig):
             weights["loss_spatio_temporal_waypoints"] = 0.0
             weights["loss_spatial_route"] = 0.0
             weights["loss_target_speed"] = 0.0
+
+        if self.use_clapad_head:
+            weights["loss_speed_scores"] = 0.2
+            weights["TTC_Score"] = 0.0
+            weights["traffic_light"] = 0.0
+            weights["stop_sign"] = 0.0
+            
+
 
         if self.use_clapad_head:
             weights["loss_speed_scores"] = 0.2
