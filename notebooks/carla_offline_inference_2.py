@@ -35,7 +35,7 @@ def load_model_and_config(checkpoint_dir):
 
 
 def get_dataset(training_config):
-    training_config.carla_root = "data/carla_leaderboard2"
+    # training_config.carla_root = "data/carla_leaderboard2"
     dataset = CARLAData(
         root=training_config.carla_data, config=training_config, random=False
     )
@@ -78,7 +78,7 @@ def main():
         sample = visualize_sample(training_config, dataset, index=index)
         prediction = run_inference(open_loop_inference, sample)
         file_path = f"prediction_{index}.png"
-        folder = "/workspace/temp_vis"
+        folder = "/workspace/temp_vis/clapad"
         os.makedirs(folder, exist_ok=True)
         file_path = os.path.join(folder, f"prediction_{index}.png")
         visualize_prediction(training_config, sample, prediction, file_path)
@@ -87,4 +87,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-# export PYTHONPATH=/workspace/lead:/workspace/lead:/workspace/lead/3rd_party/Bench2Drive/scenario_runner/srunner:/workspace/lead/3rd_party/CARLA_0915/PythonAPI:/workspace/lead/3rd_party/CARLA_0915/PythonAPI/carla:/workspace/lead/3rd_party/Bench2Drive:/workspace/lead/3rd_party/Bench2Drive/scenario_runner && python3.10 /workspace/lead/notebooks/carla_offline_inference_2.py
+# export PYTHONPATH=/workspace/lead:/workspace/lead:/workspace/lead/3rd_party/Bench2Drive/scenario_runner/srunner:/workspace/lead/3rd_party/CARLA_0915/PythonAPI:/workspace/lead/3rd_party/CARLA_0915/PythonAPI/carla:/workspace/lead/3rd_party/Bench2Drive:/workspace/lead/3rd_party/Bench2Drive/scenario_runner && /workspace/lead/.venv/bin/python /workspace/lead/notebooks/carla_offline_inference_2.py
