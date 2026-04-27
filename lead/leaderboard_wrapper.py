@@ -44,7 +44,6 @@ class ModeConfig:
         checkpoint: str | None,
         routes: str,
         use_py123d: bool = False,
-        is_irl_fuser_agent: bool = False,
     ) -> tuple[LeaderboardType, str, str, str | None, str]:
         """Get mode configuration based on CLI arguments.
 
@@ -56,7 +55,6 @@ class ModeConfig:
             checkpoint: Model checkpoint path (None for expert)
             routes: Routes file path
             use_py123d: Whether to use expert_py123d.py instead of expert.py
-            is_irl_fuser_agent: Whether IRL-Fuser agent mode is selected
 
         Returns:
             Tuple of (leaderboard_type, agent, agent_config, checkpoint_dir, track)
@@ -89,15 +87,6 @@ class ModeConfig:
                 checkpoint,
                 checkpoint,
                 "MAP",
-            )
-
-        if is_irl_fuser_agent:
-            return (
-                _resolve_leaderboard_type(),
-                "lead/inference/irl_fuser_agent.py",
-                checkpoint,
-                checkpoint,
-                "SENSORS",
             )
 
         return (
@@ -416,7 +405,6 @@ class LeaderboardWrapper:
                 checkpoint=self.args.checkpoint,
                 routes=str(self.routes),
                 use_py123d=self.args.py123d if hasattr(self.args, "py123d") else False,
-                is_irl_fuser_agent=getattr(self.args, "irl_fuser_agent", False),
             )
         )
         self.leaderboard_type = leaderboard_type
@@ -661,11 +649,6 @@ Examples:
         action="store_true",
         help="Use lead/carl_agent/carl_agent.py with MAP track (requires --checkpoint)",
     )
-    parser.add_argument(
-        "--irl-fuser-agent",
-        action="store_true",
-        help="Use lead/inference/irl_fuser_agent.py with SENSORS track (requires --checkpoint)",
-    )
 
     # Py123D option for expert mode
     parser.add_argument(
@@ -807,10 +790,6 @@ def main() -> None:
     if args.carl_agent and not args.checkpoint:
         parser.error("--carl-agent requires --checkpoint")
 
-    # Validate irl-fuser mode flag
-    if getattr(args, "irl_fuser_agent", False) and not args.checkpoint:
-        parser.error("--irl-fuser-agent requires --checkpoint")
-
     # Validate multigpu flag
     if args.multigpu and args.expert:
         parser.error("--multigpu is not supported with --expert mode")
@@ -828,8 +807,6 @@ def main() -> None:
         LOG.info(f"Running in expert mode with {agent_type} agent")
     elif args.carl_agent:
         LOG.info("Running in CaRL evaluation mode")
-    elif getattr(args, "irl_fuser_agent", False):
-        LOG.info("Running in IRL-Fuser evaluation mode")
 
     if args.multigpu:
         LOG.info(
