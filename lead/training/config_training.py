@@ -310,7 +310,7 @@ class TrainingConfig(BaseConfig):
 
     # --- Training speed and memory optimization ---
     # Number of data loader workers to prefetch batches.
-    prefetch_factor = 4
+    prefetch_factor = 2
 
     @property
     def compile(self):
@@ -1086,14 +1086,14 @@ class TrainingConfig(BaseConfig):
             cpus_per_task = os.environ.get("SLURM_CPUS_PER_TASK")
             if cpus_per_task:
                 return int(cpus_per_task)
-        return 8
+        return 16
 
     @property
     def workers_per_cpu_cores(self):
         """Number of data loader workers per CPU core."""
         if not self.mixed_data_training and not self.use_carla_data:
             return 1
-        return 10
+        return 2
 
     def training_dict(self) -> dict[str, Any]:
         """Convert training configuration to a dictionary for serialization and logging."""
