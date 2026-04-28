@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
 import time
 
@@ -711,11 +712,11 @@ class CARLAData(Dataset):
                 )
 
         if self.config.use_clapad_head:
-            scene_score_info = self.get_scene_score_info(data=data)
+            scene_score_info = self.get_scene_score_info(data=data, sensor_data=sensor_data)
             data["scene_score_info"] = scene_score_info
         return data
 
-    def get_scene_score_info(self, data):
+    def get_scene_score_info(self, data, sensor_data):
         """
         Get scene score information for the current index.
         It extract the following:
@@ -756,17 +757,19 @@ class CARLAData(Dataset):
 
         rel_boxes = get_rel_bbox(
             data = data,
+            sensor_data = sensor_data,
             min_x_meter = self.config.min_x_meter,
             max_x_meter = self.config.max_x_meter,
             pixels_per_meter = self.config.pixels_per_meter
         )
-        self.ttc_time_horizon = 1.0 # in seconds
+
+        self.ttc_time_horizon = self.config.ttc_time_horizon # in seconds
         class_names = [
             'VEHICLE', 'WALKER', 'TRAFFIC_LIGHT', 'STOP_SIGN',
             'SPECIAL', 'OBSTACLE', 'PARKING', 'BIKER'
         ]
         ttc_dynamic_obj = [
-            'VEHICLE', 'WALKER', 'BIKER'
+            'VEHICLE', 'WALKER', 'BIKER', 'SPECIAL'
         ]
         tf_light_obj = 'TRAFFIC_LIGHT'
         stop_sign_obj = 'STOP_SIGN'
@@ -775,7 +778,7 @@ class CARLAData(Dataset):
         # Traffic Rules
         tf_list = []
         for box in rel_boxes:
-            x, y, h, w, yaw, vx, vy, cls = box
+            x, y, h, w, yaw, vx, vy, cls, fut_wp = box
 
             obj_name = class_names[int(cls)]
             if obj_name == tf_light_obj:
@@ -808,8 +811,32 @@ class CARLAData(Dataset):
             else:
                 # current position
                 p_now = np.array([x, y])
+                # Calculate bounding box corners at current time
+                c, s = np.cos(yaw), np.sin(yaw)
+                rot = np.array([[c, -s], [s, c]])
+                half_w, half_h = w / 2, h / 2
+                corners = np.array([
+                    [-half_h, -half_w],
+                    [ half_h, -half_w],
+                    [ half_h,  half_w],
+                    [-half_h,  half_w]
+                ])
+                corners = (corners @ rot.T) + np.array([x, y])
                 # future position (constant velocity)
                 p_fut = p_now + np.array([vx, vy]) * self.ttc_time_horizon
+                # future wp logic
+                new_hz = 10
+                old_hz = 4 # The original waypoints are at 4Hz, we upsample them to 10Hz for ttc calculation.
+                if (vx == 0 and vy == 0) or (fut_wp.shape[0] < (old_hz * self.ttc_time_horizon)):
+                    fut_wp_ups = np.zeros((int(new_hz * self.ttc_time_horizon), 2))
+                    fut_wp_invalid = True
+                else:
+                    t_old, t_new, fut_wp_ups = upsample_spline(
+                        fut_wp=fut_wp,
+                        old_hz=old_hz,
+                        new_hz=new_hz
+                    )
+                    fut_wp_invalid = False
                 obj_dict = {
                     "type": obj_name.lower(),
                     "p_o_x": x,
@@ -820,7 +847,10 @@ class CARLAData(Dataset):
                     "vy": vy,
                     "yaw": yaw,
                     "bbox": [w.item()*2, h.item()*2],
-                    "ttc_cal": obj_name in ttc_dynamic_obj
+                    "ttc_cal": obj_name in ttc_dynamic_obj,
+                    "fut_wp": fut_wp_ups,
+                    "fut_wp_invalid": fut_wp_invalid,
+                    "corners": corners
                 }
                 obj_list.append(obj_dict)
                 
@@ -1291,6 +1321,36 @@ class CARLAData(Dataset):
 
     def __len__(self):
         return self.lidars.shape[0]
+    
+    def get_index(self, img_name):
+        """
+        Never used in the code, for debugging purpose only
+        """
+        for idx,img in enumerate(self.images):
+            if img_name in str(img, encoding="utf-8"):
+                return np.where(self.images == img)[0][0]
+        return None
+
+from scipy.interpolate import CubicSpline
+import numpy as np
+
+def upsample_spline(fut_wp, duration=2.0, old_hz=4, new_hz=10):
+    T = fut_wp.shape[0]
+
+    # Force original timestamps to span full duration
+    t_old = np.linspace(0, duration, T)
+
+    # Force new timestamps to match desired frequency
+    t_new = np.linspace(0, duration, int(duration * new_hz))
+
+    cs_x = CubicSpline(t_old, fut_wp[:, 0])
+    cs_y = CubicSpline(t_old, fut_wp[:, 1])
+
+    x_new = cs_x(t_new)
+    y_new = cs_y(t_new)
+
+    return t_old, t_new, np.stack([x_new, y_new], axis=1)
+
 
 def vis_rel_bbox(data, rel_boxes, save_path):
     ego_extent_x=2.5   # meters (half-length or full? match your config)
@@ -1336,7 +1396,7 @@ def vis_rel_bbox(data, rel_boxes, save_path):
     ax.plot(ego_plot[:, 0], ego_plot[:, 1], 'r-', linewidth=2)
 
     for box in rel_boxes:
-        x, y, w, h, yaw, vx, vy, box_cls = box
+        x, y, w, h, yaw, vx, vy, box_cls, fut_wp = box
 
         # ✅ correct yaw after frame rotation
         yaw_plot = yaw + np.pi / 2
@@ -1377,8 +1437,11 @@ def vis_rel_bbox(data, rel_boxes, save_path):
     plt.show()
     plt.close(fig)
 
-def get_rel_bbox(data, min_x_meter, max_x_meter, pixels_per_meter):
-    boxes = data["center_net_bounding_boxes"]
+def get_rel_bbox(data, sensor_data, min_x_meter, max_x_meter, pixels_per_meter):
+    # boxes = data["center_net_bounding_boxes"]
+    boxes = sensor_data.boxes
+    boxes_wps = sensor_data.boxes_waypoints
+    boxes_num_wps = sensor_data.boxes_num_waypoints
     bev_shape = data["rasterized_lidar"].shape # [1, 320, 384]
     bev_shape = bev_shape[1:]
     H, W = bev_shape[:2]
@@ -1386,7 +1449,7 @@ def get_rel_bbox(data, min_x_meter, max_x_meter, pixels_per_meter):
     ego_px = int(W * (-min_x_meter / (max_x_meter - min_x_meter)))
     ego_py = int(H / 2)
     rel_boxes = []
-    for box in boxes:
+    for box_idx, box in enumerate(boxes):
         cx, cy, w, h, yaw, speed = box[:6]
 
         if cx==0 and cy==0 and w==0 and h==0:
@@ -1418,13 +1481,16 @@ def get_rel_bbox(data, min_x_meter, max_x_meter, pixels_per_meter):
         vx = speed * np.cos(yaw)
         vy = speed * np.sin(yaw)
 
+        fut_wps = boxes_wps[box_idx][:boxes_num_wps[box_idx]]
+
         rel_boxes.append([
             x_rel, y_rel,
             w / pixels_per_meter,
             h / pixels_per_meter,
             yaw,
             vx, vy,
-            box_cls
+            box_cls,
+            fut_wps,
         ])
     return rel_boxes
 
@@ -1480,6 +1546,12 @@ def vis_ttc_debug_full(data, scene_dict, save_path="ttc_debug_full.png"):
                  head_width=0.3, length_includes_head=True,
                  color='gray', alpha=0.7)
 
+        # plot bbox corners (current)
+        corners = obj.get("corners")
+        if corners is not None:
+            corners_plot = np.array([to_plot_frame(px, py) for px, py in corners])
+            ax.plot(corners_plot[:, 0], corners_plot[:, 1], 'm-', linewidth=1)
+
         ax.text(px, py, obj_type, fontsize=6)
 
     # traffic rules
@@ -1502,6 +1574,7 @@ def vis_ttc_debug_full(data, scene_dict, save_path="ttc_debug_full.png"):
 
     # ======================
     plt.tight_layout()
+    os.makedirs("/workspace/temp_vis/", exist_ok=True)
     plt.savefig("/workspace/temp_vis/" + save_path)
     plt.show()
     plt.close(fig)
