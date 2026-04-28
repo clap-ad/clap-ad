@@ -73,7 +73,7 @@ class PlanningHeadClap(nn.Module):
         self.cosine_pos_embeding = PositionEmbeddingSine(
             config, self.config.transfuser_token_dim // 2, normalize=True
         )
-        self.planning_steps = 12 # since we predict 12 waypoints in future
+        self.planning_steps = self.config.num_route_points_prediction # since we predict 12 waypoints in future
         self.path_query = nn.Parameter(
             torch.zeros(
                 1,
@@ -127,14 +127,14 @@ class PlanningHeadClap(nn.Module):
 
         # Loss funcations
         speed_bins=[0, 2.5, 5, 7, 8.5, 10, 12] # speed bins for the speed head
-        ttc_time_horizon = 1.0 # in seconds
+        ttc_time_horizon = self.config.ttc_time_horizon # in seconds
         self.loss_speed = SpeedScoringLoss(
             speed_bins=speed_bins,
             crt_cfg_dict={
                 "ttc_cfg":{
                     "time_horizon": ttc_time_horizon,
                     "coll_radius": 0.1,
-                    "safe_distance": 1.0
+                    "safe_distance": 0.5
                 },
                 "traffic_rule_cfg":{
                     "speed_thresh":0.1,

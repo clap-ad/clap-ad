@@ -278,8 +278,7 @@ class TrainingConfig(BaseConfig):
         """Batch size for training."""
         if self.debug_mode:
             return 2
-        return 512
-        return 512
+        return 64
 
     @property
     def torch_float_type(self):
@@ -713,12 +712,11 @@ class TrainingConfig(BaseConfig):
     # If true smooth the route points with a spline.
     smooth_route = True
     # Number of route points we use for smoothing.
-    num_route_points_smoothing = 20
+    num_route_points_smoothing = 25
     # Number of route checkpoints to predict. Needs to be smaller than num_route_points_smoothing!
     # num_route_points_prediction = 10
-    num_route_points_prediction = 12
-    # num_route_points_prediction = 10
-    num_route_points_prediction = 12
+    num_route_points_prediction = 24
+    ttc_time_horizon = 2.0 # seconds
     # Assume maximum distance between two future waypoints in meters.
     max_distance_future_waypoint = 10.0
     target_first_distance = 1.0 #. 1 meters between waypoints
