@@ -123,6 +123,16 @@ class ClosedLoopConfig(OpenLoopConfig):
     lateral_n = 6
     # If true use tuned aim distance for navigation
     tuned_aim_distance = False
+    
+    # --- Clap-AD controller Settings ---
+    # Score threshold for considering a speed bin as safe in the Clap-AD controller (0-1)
+    score_threshold = 0.3
+    # If true, use acceleration-aware speed selection in the Clap-AD controller
+    # does not accelerate to speeds if the bins between current speed and target speed are not safe
+    # allows braking even if intermediate bins are not safe (since braking is safer and faster than accelerating)
+    acceleration_aware_speed_selection = False
+    # Number of frames to wait at a stop sign before considering the stop completed
+    stop_sign_wait_frames = 20
 
     # --- Evaluation Visualization Settings ---
     # If not None, set a custom weather for evaluation
