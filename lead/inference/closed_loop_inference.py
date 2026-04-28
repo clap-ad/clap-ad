@@ -216,19 +216,35 @@ class ClosedLoopInference(OpenLoopInference):
             throttle: Throttle command in [0, 1]
             brake: Brake command in [0, 1]
         """
-        def get_desired_speed_from_scores(pred_speed_scores, threshold=0.3):
+        def get_desired_speed_from_scores(pred_speed_scores, threshold=0.3, accel_awareness=False, curr_speed=None):
             # Find bins where all criteria have non-zero scores
             valid_bins = np.all(pred_speed_scores > threshold, axis=0)  # shape: [S], True if all criteria > 0
-            # Choose the largest bin index that is valid
+            # Filter valid bins based on acceleration awareness
+            if accel_awareness:
+                assert curr_speed is not None, "Current speed must be provided for acceleration awareness"
+
+                curr_speed_idx = np.searchsorted(self.speed_bins, curr_speed, side='right') - 1
+                curr_speed_idx = np.clip(curr_speed_idx, 0, len(self.speed_bins) - 1)
+                # For bins higher than the current speed, check that all bins between it and curr_speed_idx are also valid
+                connected_bins = np.zeros_like(valid_bins)
+                for i in range(len(valid_bins)):
+                    if i > curr_speed_idx:
+                        # accelerating checks for feasability
+                        if np.all(valid_bins[curr_speed_idx + 1:i + 1]):
+                            connected_bins[i] = True
+                    else:
+                        # braking is faster and safety critical
+                        connected_bins[i] = valid_bins[i]
+                valid_bins = connected_bins
+            
+            # Choose bin index
             if np.any(valid_bins):
                 valid_candidates = np.where(valid_bins)[0]
                 # best_speed_bin_idx = int(np.median(valid_candidates))
                 # best_speed_bin_idx = int(np.max(valid_candidates))
-                best_speed_bin_idx = int(np.percentile(valid_candidates, 50, interpolation='higher'))
+                best_speed_bin_idx = int(np.percentile(valid_candidates, 50, interpolation='higher')) # like median but rounds up
             else:
-                # Fallback: choose the bin with the highest overall score
-                # overall_scores = np.sum(first_path_scores, axis=0)
-                # best_speed_bin_idx = np.argmax(overall_scores)
+                # Fallback: 0 m/s
                 best_speed_bin_idx = 0
             target_speed = self.speed_bins[best_speed_bin_idx]
             return target_speed
@@ -241,7 +257,7 @@ class ClosedLoopInference(OpenLoopInference):
             # speed bin 2.5m/s is too noisy, therefore we ignore it in the stop sign controller
             # stop_scores[:, 1] = 0.0
 
-            stop_target = get_desired_speed_from_scores(stop_scores)
+            stop_target = get_desired_speed_from_scores(stop_scores, self.config_closed_loop.score_threshold)
             
             if stop_target > 0 and speed > 2.0:
                 # If stop sign is not detected, reset stop completed status
@@ -255,7 +271,7 @@ class ClosedLoopInference(OpenLoopInference):
             if stop_target == 0 and speed < 0.01:
                 # If stop sign is detected and we are stopped, wait 1 second (20 frames)
                 self.stop_wait_count += 1
-                if self.stop_wait_count >= 20:
+                if self.stop_wait_count >= self.config_closed_loop.stop_sign_wait_frames:
                     self.stop_completed = True
             else:
                 self.stop_wait_count = 0
@@ -268,7 +284,12 @@ class ClosedLoopInference(OpenLoopInference):
         pred_speed_logits = pred_speed_logits[0][0] # .float()  # shape: [M, S], M=criteria, S=speed bins
         pred_speed_scores = 1 / (1 + np.exp(-pred_speed_logits))
         stop_sign_controller()
-        pred_target_speed = get_desired_speed_from_scores(pred_speed_scores)
+        pred_target_speed = get_desired_speed_from_scores(
+            pred_speed_scores,
+            threshold=self.config_closed_loop.score_threshold,
+            accel_awareness=self.config_closed_loop.acceleration_aware_speed_selection,
+            curr_speed=speed
+        )
 
 
         brake = bool(
