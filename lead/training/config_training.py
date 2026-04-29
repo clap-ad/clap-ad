@@ -207,9 +207,10 @@ class TrainingConfig(BaseConfig):
     @property
     def training_session_cache_path(self):
         """Path to SSD cache directory."""
-        tmp_folder = "/scratch/" + str(os.environ.get("SLURM_JOB_ID"))
-        if not self.is_on_tcml:
-            tmp_folder = str(os.environ.get("SCRATCH", f"/tmp/{os.environ['USER']}"))
+        # tmp_folder = "/scratch/" + str(os.environ.get("SLURM_JOB_ID"))
+        # if not self.is_on_tcml:
+        #     tmp_folder = str(os.environ.get("SCRATCH", f"/tmp/{os.environ['USER']}"))
+        tmp_folder = f"/workspace/.cache/tmp/{os.environ['USER']}"
         return tmp_folder
 
     # Root directory for CARLA sensor data.
@@ -278,7 +279,7 @@ class TrainingConfig(BaseConfig):
         """Batch size for training."""
         if self.debug_mode:
             return 2
-        return 64
+        return 512
 
     @property
     def torch_float_type(self):
@@ -1109,7 +1110,7 @@ class TrainingConfig(BaseConfig):
         """Number of data loader workers per CPU core."""
         if not self.mixed_data_training and not self.use_carla_data:
             return 1
-        return 2
+        return 4
 
     def training_dict(self) -> dict[str, Any]:
         """Convert training configuration to a dictionary for serialization and logging."""
