@@ -200,7 +200,8 @@ def compute_min_distance_traj(ego_traj, obj_traj, ego_wl, obj_wl, ego_yaws=None,
         for t in range(len(ego_traj)):
             p_e = ego_traj[t]
             p_o = obj_traj[t]
-
+            # Todo: logic for discarding calculation based on w/l <10m
+            
             dist, ego_corners, corners = _get_bbox_distance(
                 p_e[0], p_e[1], ego_wl[0], ego_wl[1],
                 p_o[0], p_o[1], obj_wl[0], obj_wl[1],
@@ -283,6 +284,8 @@ def _compute_ttc_for_bin(
 
         threat_actor = None
         min_distance = safe_distance
+        ego_full_path = np.vstack([p_e.reshape(1, 2), p_e_future_points])
+        ego_yaws = get_stable_yaws(ego_full_path, 0.0, threshold=0.05)
         for actor in scene_score_info[b]["actors"]:
             if not actor["ttc_cal"]:
                 continue
@@ -311,21 +314,13 @@ def _compute_ttc_for_bin(
                 # fut_wp has shape [T, 2], we can directly use it as future trajectory and check swept distance at multiple time steps
                 obj_wl = [float(x) for x in actor["bbox"]]
                 fut_wp = fut_wp[0] if fut_wp.ndim == 3 else fut_wp  # Handle case where fut_wp has extra batch dimension
-                edge_by_edge = True  # Whether to check distance edge by edge or just point to point
+                edge_by_edge = False  # Whether to check distance edge by edge or just point to point
                 if edge_by_edge:
                     curr_yaw = actor["yaw"]
                     # calculate yaw for each time step based on trajectory, then calculate corners for each time step, and check distance between corners and ego box
                     p_o = np.array([actor["p_o_x"], actor["p_o_y"]])
                     agent_full_path = np.vstack([p_o.reshape(1, 2), fut_wp])
-                    # agent_yaws = np.arctan2(np.diff(agent_full_path[:, 1]), np.diff(agent_full_path[:, 0]))
-                    # agent_yaws  = np.concatenate((curr_yaw.reshape(1), agent_yaws))  # prepend current yaw for the first time step
-                    # agent_yaws = np.unwrap(agent_yaws)  # unwrap to prevent discontinuities
                     agent_yaws = get_stable_yaws(agent_full_path, curr_yaw, threshold=0.05)
-                    ego_full_path = np.vstack([p_e.reshape(1, 2), p_e_future_points])
-                    # ego_yaws = np.arctan2(np.diff(ego_full_path[:, 1]), np.diff(ego_full_path[:, 0]))
-                    # ego_yaws = np.concatenate(([0.0], ego_yaws))
-                    # ego_yaws = np.unwrap(ego_yaws)
-                    ego_yaws = get_stable_yaws(ego_full_path, 0.0, threshold=0.05)
 
                 dist_future = compute_min_distance_traj(
                     ego_traj=p_e_future_points,
