@@ -1032,6 +1032,9 @@ class Visualizer:
                     "speed_thresh":0.1,
                     "ss_stop_distance": 0.0
                 },
+                "overtake_cfg":{
+                    "ot_stop_distance": 20.0
+                }
             },
         )
         curr_speed = self.data.get("speed")[0]
@@ -1760,6 +1763,18 @@ def draw_speed_scores_append_bottom(image, sp_logits, speed_bins, incl_gt_score=
         color=stop_color,
         alpha=stop_alpha,
     )
+    if sp_logits.shape[0] == 4: # overtake score exists
+        ot_label = 'Overtake'
+        ot_color = 'red'
+        ot_alpha = 1
+        ax_bar.bar(
+            bins + 2*bar_width,
+            sp_logits[3],
+            width=bar_width,
+            label=ot_label,
+            color=ot_color,
+            alpha=ot_alpha,
+        )
     ax_bar.set_xlabel('Speed Bin')
     ax_bar.set_ylabel('Score')
     ax_bar.legend()

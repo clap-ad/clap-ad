@@ -48,7 +48,7 @@ class HydraSpeedHead(nn.Module):
         self.common_score_mlp = common_score_mlp
         self.flags_shapes_dict = flags_shapes_dict
         if self.flags_shapes_dict is None:
-            self.flags_shapes_dict = {'ttc': 0, 'tl': 0, 'st': 0}
+            self.flags_shapes_dict = {'ttc': 0, 'tl': 0, 'st': 0, 'ot': 0}
 
         # self.agent_fuser = AgentFuser(embed_dims=self.embed_dims, fuser_dim=fuser_dim)
         self.agent_encoder = nn.Sequential(
@@ -87,6 +87,10 @@ class HydraSpeedHead(nn.Module):
                 self.tl_context_encoder = ContextEncoder(num_path=planning_steps * 2, num_flags=self.flags_shapes_dict.get("tl"), flag_emb_dim=8, hidden_dim=self.embed_dims, out_dim=self.embed_dims, use_speed=False)
                 if num_modes == 3:
                     self.st_context_encoder = ContextEncoder(num_path=planning_steps * 2, num_flags=self.flags_shapes_dict.get("st"), flag_emb_dim=8, hidden_dim=self.embed_dims, out_dim=self.embed_dims, use_speed=False)
+                if num_modes == 4:
+                    self.st_context_encoder = ContextEncoder(num_path=planning_steps * 2, num_flags=self.flags_shapes_dict.get("st"), flag_emb_dim=8, hidden_dim=self.embed_dims, out_dim=self.embed_dims, use_speed=False)
+                    self.ot_context_encoder = ContextEncoder(num_path=planning_steps * 2, num_flags=self.flags_shapes_dict.get("ot"), flag_emb_dim=8, hidden_dim=self.embed_dims, out_dim=self.embed_dims, use_speed=False)
+                
             
             if self.common_score_mlp:
                 self.prob_mlp = nn.Sequential(
@@ -115,6 +119,19 @@ class HydraSpeedHead(nn.Module):
                         nn.ReLU(inplace=True),
                         nn.Linear(self.embed_dims // 2, 1)
                     )
+                if num_modes == 4:
+                    self.st_prob_mlp = nn.Sequential(
+                        nn.Linear(self.embed_dims, self.embed_dims // 2),
+                        nn.LayerNorm(self.embed_dims // 2),
+                        nn.ReLU(inplace=True),
+                        nn.Linear(self.embed_dims // 2, 1)
+                    )
+                    self.ot_prob_mlp = nn.Sequential(
+                        nn.Linear(self.embed_dims, self.embed_dims // 2),
+                        nn.LayerNorm(self.embed_dims // 2),
+                        nn.ReLU(inplace=True),
+                        nn.Linear(self.embed_dims // 2, 1)
+                    )
             
             
             self.ttc_attn = nn.MultiheadAttention(embed_dims, num_heads=8, batch_first=True)
@@ -126,6 +143,13 @@ class HydraSpeedHead(nn.Module):
                 # stop sign branch
                 self.st_attn = nn.MultiheadAttention(embed_dims, num_heads=8, batch_first=True)
                 self.st_queries = nn.Parameter(torch.randn(1, num_speed_bins, self.embed_dims))
+            if num_modes == 4:
+                # stop sign branch
+                self.st_attn = nn.MultiheadAttention(embed_dims, num_heads=8, batch_first=True)
+                self.st_queries = nn.Parameter(torch.randn(1, num_speed_bins, self.embed_dims))
+                # overtake branch
+                self.ot_attn = nn.MultiheadAttention(embed_dims, num_heads=8, batch_first=True)
+                self.ot_queries = nn.Parameter(torch.randn(1, num_speed_bins, self.embed_dims))
 
         self.path_aug_cnt = path_aug_cnt
 
@@ -146,6 +170,8 @@ class HydraSpeedHead(nn.Module):
             return self.tl_context_encoder(*args, **kwargs)
         elif context_type == 'st':
             return self.st_context_encoder(*args, **kwargs)
+        elif context_type == 'ot':
+            return self.ot_context_encoder(*args, **kwargs)
         else:
             raise ValueError(f"Unknown context_type: {context_type}")
         
@@ -183,7 +209,13 @@ class HydraSpeedHead(nn.Module):
             speed_logits_st = self._forward_stop_sign_tfv6(plan_query, path_pred)  # [B, NUM_PATHS=1, MODES=1, S]
             speed_logits = torch.cat([speed_logits, speed_logits_st.expand(-1, NUM_PATHS, -1, -1)], dim=2)  # [B, NUM_PATHS, 3, S]
 
-            
+        if self.num_modes == 4:
+            speed_logits_st = self._forward_stop_sign_tfv6(plan_query, path_pred)  # [B, NUM_PATHS=1, MODES=1, S]
+            speed_logits = torch.cat([speed_logits, speed_logits_st.expand(-1, NUM_PATHS, -1, -1)], dim=2)  # [B, NUM_PATHS, 4, S]
+
+            speed_logits_ot = self._forward_overtake_tfv6(plan_query, path_pred)  # [B, NUM_PATHS=1, MODES=1, S]
+            speed_logits = torch.cat([speed_logits, speed_logits_ot.expand(-1, NUM_PATHS, -1, -1)], dim=2)  # [B, NUM_PATHS, 4, S]
+
         return speed_logits, path_pred_augmented
 
     
@@ -329,7 +361,44 @@ class HydraSpeedHead(nn.Module):
         speed_logits = self.get_scores_from_query('st', speed_tokens)  # [B, S, 1]
 
         return speed_logits.reshape(B, 1, 1, S)  # [B, NUM_PATHS=1, MODES=1, S]
-        
+
+    def _forward_overtake_tfv6(self, plan_query, path_pred):
+        """
+        Speed prediction forward pass.
+        Accepts overtake and context inputs for overtake score.
+
+        Args:
+            plan_query (torch.Tensor): Plan query output (B, HW, C)
+            path_pred (torch.Tensor): Path output offsets [B, 2 * planning_steps]
+        Note:
+            In encoding part, basically we view each pixel as an object with its own features.
+            Previously in self.static_encoder(plan_query) it was [B, Ns, C],
+            but now it is [B, HW, C].
+        Returns:
+            torch.Tensor: Speed logits [B, 1, 1, S].
+        """
+        # NOTE: Do not call directly because detaching is handled in forward()
+        B = path_pred.shape[0]
+        attn_input = []
+
+        context_token = self.get_context_token('ot', path_pred).unsqueeze(1)  # [B, 1, C]
+        attn_input.append(context_token)
+
+        # object path (overtake score)
+        B, Ns, C = plan_query.shape
+        obj_tokens = self.static_encoder(plan_query)  # [B, Ns, C]
+        attn_input.append(obj_tokens)
+
+        # only use ot queries
+        speed_queries = self.ot_queries # [1, S, C]
+        _, S, C = speed_queries.shape
+
+        attn_input = torch.cat(attn_input, dim=1)  # [B, Ns+1, C]
+        speed_queries = speed_queries.expand(B, -1, -1)  # [B, S, C]
+        speed_tokens, _ = self.ot_attn(speed_queries, attn_input, attn_input)  # [B, S, C]
+        speed_logits = self.get_scores_from_query('ot', speed_tokens)  # [B, S, 1]
+
+        return speed_logits.reshape(B, 1, 1, S)  # [B, NUM_PATHS=1, MODES=1, S]
 
     def _forward_time_to_collision(self, track_query, traj_query, traj_scores, path_pred, speed=None, flags=None):
         """

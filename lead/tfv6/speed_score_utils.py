@@ -692,3 +692,56 @@ def lateral_shift_paths(path):
     aug_paths.append(curved_path)
 
     return torch.stack(aug_paths, dim=1)  # [B, K+1, T, 2]
+
+def compute_overtake_adherence(
+    speed_bins,
+    scene_score_info,
+    stop_distance_from_trigger,
+    decel_min,
+    decel_max,
+):
+    """
+    Batched version: scene_score_info is a list of B dicts.
+    Returns: torch.Tensor of shape [B, num_bins]
+    """
+    B = len(scene_score_info)
+    num_bins = len(speed_bins)
+    all_scores = []
+    for b in range(B):
+        rules_score = [1.0 for _ in speed_bins]
+        overtake_info = scene_score_info[b].get("overtake_info", None)
+        if overtake_info is not None:
+            dist_to_trig = overtake_info["dist_to_trig"]
+            expert_throttle = overtake_info["expert_throttle"]
+            scen_type = overtake_info["type"][0]
+            dist_trig_bound = [19, 21]
+            if scen_type == "accidenttwoways":
+                dist_trig_bound = [17, 21]
+            elif scen_type == "constructionobstacletwoways":
+                dist_trig_bound = [19, 21]
+            # We can specify the type-based condition here
+            if dist_trig_bound[0] <= dist_to_trig <= dist_trig_bound[1]:
+                if expert_throttle == 1:
+                    for idx, bin_speed in enumerate(speed_bins):
+                        rules_score[idx] = 1.0 if idx != 0 else 0.0
+                else:
+                    for idx, bin_speed in enumerate(speed_bins):
+                        rules_score[idx] = 0.0 if idx != 0 else 1.0
+            elif dist_to_trig > dist_trig_bound[1]: # decrease speed gradually
+                for idx, bin_speed in enumerate(speed_bins):
+                    if bin_speed < 1e-2:
+                        rules_score[idx] = 1.0
+                        continue
+                    required_decel = _required_decel_to_stop(
+                        speed=bin_speed,
+                        dist_to_trig=dist_to_trig,
+                        stop_distance_from_trigger=stop_distance_from_trigger,
+                    )
+                    if math.isinf(required_decel):
+                        rules_score[idx] = 0.0
+                    else:
+                        rules_score[idx] = _decel_to_score(required_decel, decel_min, decel_max)
+            else:
+                rules_score = [1.0 for _ in speed_bins]
+        all_scores.append(rules_score)
+    return torch.tensor(all_scores, dtype=torch.float32)  # Shape: [B, num_bins]

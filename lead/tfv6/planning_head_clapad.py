@@ -1,6 +1,6 @@
 
 
-from lead.tfv6.speed_score_utils import compute_stop_sign_adherence, compute_traffic_light_adherence, compute_ttc
+from lead.tfv6.speed_score_utils import compute_overtake_adherence, compute_stop_sign_adherence, compute_traffic_light_adherence, compute_ttc
 from lead.tfv6.planning_decoder import PositionEmbeddingSine
 from lead.tfv6.hydra_speed_head import HydraSpeedHead
 import torch
@@ -98,7 +98,7 @@ class PlanningHeadClap(nn.Module):
             nn.ReLU(),
             nn.Linear(embed_dims, 2),
         )
-        
+        num_modes = 4 # TTC - TF-light - Stop sign - Overtake
         assert num_modes > 1
         # use same speed head for time-to-collision (TTC) and traffic light (TL) branches
         # speed_fuser_dim = fuser_dim - 1 # In speed, navigation does not get fused
@@ -110,7 +110,7 @@ class PlanningHeadClap(nn.Module):
         self.speed_branch = HydraSpeedHead(
             embed_dims=embed_dims,
             num_speed_bins=num_speed_bins, 
-            num_modes=3, 
+            num_modes=num_modes, 
             planning_steps=self.planning_steps, 
             path_aug_cnt=path_aug_cnt, 
             combined_attention=speed_combined_attention, 
@@ -140,6 +140,9 @@ class PlanningHeadClap(nn.Module):
                     "speed_thresh":0.1,
                     "ss_stop_distance": 0.0
                 },
+                "overtake_cfg":{
+                    "ot_stop_distance": 20.0
+                }
             },
         )
         
@@ -450,12 +453,19 @@ class SpeedScoringLoss(nn.Module):
         self.ss_stop_distance = self.traffic_rule_cfg.get('ss_stop_distance', 3.0) # At this distance all ss speed scores (except 0) should be 0
         self.traffic_rule_decel_min = self.traffic_rule_cfg.get('decel_min', 2.5)  # score=1 when required decel <= this
         self.traffic_rule_decel_max = self.traffic_rule_cfg.get('decel_max', 4.0)  # score=0 when required decel >= this
+        # Overtake config
+        self.ot_cfg = crt_cfg_dict.get('overtake_cfg', {})
+        self.use_ot = True if len(self.ot_cfg) > 0 else False
+        self.ot_stop_distance = self.ot_cfg.get('ot_stop_distance', 20.0) # At this distance all ot speed scores (except 0) should be 0
+        self.ot_decel_min = self.ot_cfg.get('ot_decel_min', 2.5)  # score=1 when required decel <= this
+        self.ot_decel_max = self.ot_cfg.get('ot_decel_max', 4.0)  # score=0 when required decel >= this
         
         # Scores: NOTE: Do not change order of scores (without changing HydraSpeedHead output order)
         self.score_cfg = {
             "TTC_Score": 1.0,
             "traffic_light": 0.2,
             "stop_sign": 0.2,
+            "overtake": 0.2,
             # "comfort_scores": 0.5,
             # "feasibility_scores": 1.0,
             # "speed_limit": 0.3,
@@ -510,9 +520,20 @@ class SpeedScoringLoss(nn.Module):
                 decel_min=self.traffic_rule_decel_min,
                 decel_max=self.traffic_rule_decel_max,
             )  # Shape: [3, S_CLS]
+            if self.use_ot:
+                overtake_scores = compute_overtake_adherence(
+                    speed_bins=self.speed_bins,
+                    scene_score_info=scene_score_info,
+                    stop_distance_from_trigger=self.ot_stop_distance,
+                    decel_min=self.ot_decel_min,
+                    decel_max=self.ot_decel_max,
+                )  # Shape: [3, S_CLS]
+
 
             # NOTE: Do not change order of scores (without changing HydraSpeedHead output order)
             combined = torch.stack([ttc_scores, traffic_light_scores, stop_sign_scores], dim=1)  # [B, H, S_CLS]
+            if self.use_ot:
+                combined = torch.cat([combined, overtake_scores.unsqueeze(1)], dim=1) # [B, H+1, S_CLS]
             combined_scores.append(combined)
 
 

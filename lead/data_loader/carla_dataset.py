@@ -860,6 +860,33 @@ class CARLAData(Dataset):
         }
         if debug:
             vis_ttc_debug_full(data, scene_dict, save_path=data["scenario_type"]+data["route_number"]+data["frame_number"]+".png")
+        
+        overtake_info = True
+        if overtake_info:
+            # For overtaking scenarios.
+            overtake_scenarios = [
+                "AccidentTwoWays",
+                "VehicleOpensDoorTwoWays",
+                "ParkedObstacleTwoWays",
+                "ConstructionObstacleTwoWays",
+            ]
+            curr_scne = data["scenario_type"]
+            if curr_scne in overtake_scenarios:
+                if curr_scne == "AccidentTwoWays":
+                    dist = data["dist_to_accident_site"]
+                elif curr_scne == "VehicleOpensDoorTwoWays":
+                    dist = data["dist_to_vehicle_opens_door"]
+                elif curr_scne == "ParkedObstacleTwoWays":
+                    dist = data["dist_to_parked_obstacle"]
+                elif curr_scne == "ConstructionObstacleTwoWays":
+                    dist = data["dist_to_construction_site"]
+                expert_throttle = data["throttle"]
+                scene_dict["overtake_info"] = {
+                    "type": curr_scne.lower(),
+                    "dist_to_trig": dist,
+                    "expert_throttle": expert_throttle
+                }
+
         return scene_dict      
     
     @beartype
