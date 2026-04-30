@@ -1006,16 +1006,7 @@ class TrainingConfig(BaseConfig):
             weights["TTC_Score"] = 0.0
             weights["traffic_light"] = 0.0
             weights["stop_sign"] = 0.0
-            
-
-
-        if self.use_clapad_head:
-            weights["loss_speed_scores"] = 0.2
-            weights["TTC_Score"] = 0.0
-            weights["traffic_light"] = 0.0
-            weights["stop_sign"] = 0.0
-            
-
+            weights["overtake"] = 0.0
 
         return weights
 
