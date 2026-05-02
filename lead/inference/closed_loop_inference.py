@@ -198,7 +198,7 @@ class ClosedLoopInference(OpenLoopInference):
     def execute_route_and_best_speed(
         self,
         pred_checkpoints: jt.Float[torch.Tensor, "1 num_checkpoints 2"],
-        pred_speed_logits: jt.Float[torch.Tensor, "1 5 3 7"],
+        pred_speed_logits: jt.Float[torch.Tensor, "B N M S"],
         speed: jt.Float[torch.Tensor, "1 1"],
         ego_vehicle_location: float = 0.0,
         ego_vehicle_rotation: float = 0.0,
