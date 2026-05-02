@@ -196,6 +196,46 @@ def compute_min_distance_traj(ego_traj, obj_traj, ego_wl, obj_wl, ego_yaws=None,
 
             if dist < min_dist:
                 min_dist = dist
+        debug = False
+        if debug:
+            # Visualization: plot ego and agent bounding boxes at each time step using corners
+            import matplotlib.pyplot as plt
+            import matplotlib.cm as cm
+            fig, ax = plt.subplots(figsize=(8, 8))
+            cmap = cm.get_cmap('viridis', len(ego_traj))
+            for t in range(len(ego_traj)):
+                color = cmap(t)
+                ego_pos = ego_traj[t]
+                obj_pos = obj_traj[t]
+                ax.plot(ego_pos[0], ego_pos[1], 'o', color=color, label='Ego' if t == 0 else None)
+                ax.plot(obj_pos[0], obj_pos[1], 'x', color=color, label='Agent' if t == 0 else None)
+                # Plot ego bounding box (axis-aligned)
+                ego_w, ego_l = ego_wl
+                ego_corners = np.array([
+                    [ego_pos[0] - ego_l/2, ego_pos[1] - ego_w/2],
+                    [ego_pos[0] + ego_l/2, ego_pos[1] - ego_w/2],
+                    [ego_pos[0] + ego_l/2, ego_pos[1] + ego_w/2],
+                    [ego_pos[0] - ego_l/2, ego_pos[1] + ego_w/2]
+                ])
+                ego_poly = plt.Polygon(ego_corners, closed=True, edgecolor=color, facecolor='none', lw=2, alpha=0.5)
+                ax.add_patch(ego_poly)
+                # Plot agent bounding box (axis-aligned)
+                obj_w, obj_l = obj_wl
+                obj_corners = np.array([
+                    [obj_pos[0] - obj_l/2, obj_pos[1] - obj_w/2],
+                    [obj_pos[0] + obj_l/2, obj_pos[1] - obj_w/2],
+                    [obj_pos[0] + obj_l/2, obj_pos[1] + obj_w/2],
+                    [obj_pos[0] - obj_l/2, obj_pos[1] + obj_w/2]
+                ])
+                obj_poly = plt.Polygon(obj_corners, closed=True, edgecolor=color, facecolor='none', lw=2, linestyle='--', alpha=0.5)
+                ax.add_patch(obj_poly)
+            ax.set_aspect('equal')
+            ax.set_xlabel('X')
+            ax.set_ylabel('Y')
+            plt.legend()
+            ax.set_title('Ego and Agent Trajectories Over Time (Color = Time)')
+            plt.savefig("debug_traj_distance.png")
+            plt.show()
     else:
         for t in range(len(ego_traj)):
             p_e = ego_traj[t]
@@ -305,7 +345,7 @@ def _compute_ttc_for_bin(
                     p_o_future=p_o_future,
                     ego_wl=ego_wl,
                     obj_wl=obj_wl,
-                    steps=20
+                    steps=10 if time_horizon <=1.0 else 20
                 )
                 if dist_future < min_distance:
                     threat_actor = actor
@@ -661,7 +701,7 @@ def lateral_shift_paths(path):
     aug_paths.append(path)
 
     # ---- 1) Constant lateral shifts ----
-    lateral_shifts = torch.linspace(-0.6, 0.6, steps=2, device=device)
+    lateral_shifts = torch.linspace(-0.4, 0.4, steps=2, device=device)
     for s in lateral_shifts:
         aug_paths.append(path + s * normals)
 
