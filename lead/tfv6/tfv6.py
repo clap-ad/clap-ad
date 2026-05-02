@@ -126,6 +126,7 @@ class TFv6(nn.Module):
         ) = pred_headings = None
         pred_semantic = pred_depth = pred_bounding_box = pred_bev_semantic = None
         pred_bounding_box_navsim = pred_bev_semantic_navsim = None
+        clap_prediction_dict = None
 
         # Backbone
         bev_features, image_features = self.backbone(data)
