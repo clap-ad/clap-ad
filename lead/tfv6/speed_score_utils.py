@@ -382,54 +382,185 @@ def _compute_ttc_for_bin(
             results.append(ttc)
     return torch.tensor(results, device=device)
 
-def _compute_ttc_for_bin_dep_1(
+############################################
+#### Utils for batched TTC computations ####
+############################################
+
+def _compute_swept_bbox_batched(
+    p_e_now, p_e_future, p_o_now, p_o_future, ego_wl, obj_wl, steps=5
+):
+    """
+    Vectorized batched version for axis-aligned bounding boxes.
+    p_e_now, p_e_future: [B, 2]
+    p_o_now, p_o_future: [B, A, 2]
+    ego_wl: [2]
+    obj_wl: [B, A, 2] or [1, A, 2]
+    Returns: np.ndarray of shape [B, A] with minimum distances for each batch/actor.
+    """
+    B, A, _ = p_o_now.shape
+    alphas = np.linspace(0, 1, steps + 1).reshape(-1, 1, 1, 1)  # [steps+1, 1, 1, 1]
+
+    # Expand ego to [B, A, 2]
+    ego_wl_arr = np.broadcast_to(np.array(ego_wl).reshape(1, 1, 2), (B, A, 2))
+
+    # Interpolate ego and obj positions: [steps+1, B, A, 2]
+    curr_e = (
+        p_e_now[None, :, None, :] + alphas * (p_e_future[None, :, None, :] - p_e_now[None, :, None, :])
+    )
+    curr_o = (
+        p_o_now[None, :, :, :] + alphas * (p_o_future[None, :, :, :] - p_o_now[None, :, :, :])
+    )
+
+    # Get lengths and widths
+    ego_l = ego_wl_arr[..., 1]
+    ego_w = ego_wl_arr[..., 0]
+    obj_l = obj_wl[..., 1]
+    obj_w = obj_wl[..., 0]
+
+    # [steps+1, B, A]
+    dx = np.abs(curr_e[..., 0] - curr_o[..., 0]) - (ego_l + obj_l) / 2
+    dy = np.abs(curr_e[..., 1] - curr_o[..., 1]) - (ego_w + obj_w) / 2
+    dx = np.clip(dx, 0, None)
+    dy = np.clip(dy, 0, None)
+    dists = np.sqrt(dx ** 2 + dy ** 2)
+    # Min over steps
+    min_dists = np.min(dists, axis=0)
+    # Clamp to zero if any step is colliding
+    min_dists = np.where(np.any(dists == 0, axis=0), 0.0, min_dists)
+    return min_dists
+
+def _build_padded_actor_info(scene_score_info, T, edge_by_edge=False, yaw_threshold=0.05):
+    """
+    Extracts and pads actor info for batched computation.
+    Returns:
+        p_o:        [B, A_max, 2]
+        p_o_future: [B, A_max, 2]
+        obj_wl:     [B, A_max, 2]
+        fut_wp:     [B, A_max, T, 2] (padded with zeros if fut_wp is missing/short)
+        obj_mask:   [B, A_max] (True if valid)
+        agent_yaws: [B, A_max, T+1] (if edge_by_edge, else None)
+    """
+    B = len(scene_score_info)
+    A_max = max(len(scene["actors"]) for scene in scene_score_info)
+    p_o        = np.zeros((B, A_max, 2), dtype=np.float32)
+    p_o_future = np.zeros((B, A_max, 2), dtype=np.float32)
+    obj_wl     = np.zeros((B, A_max, 2), dtype=np.float32)
+    fut_wp     = np.zeros((B, A_max, T, 2), dtype=np.float32)
+    obj_mask   = np.zeros((B, A_max), dtype=bool)
+    agent_yaws = np.zeros((B, A_max, T+1), dtype=np.float32) if edge_by_edge else None
+
+    for b, scene in enumerate(scene_score_info):
+        for a, actor in enumerate(scene["actors"]):
+            if not actor.get("ttc_cal", True):
+                continue
+            p_o[b, a]        = [float(actor["p_o_x"]), float(actor["p_o_y"])]
+            p_o_future[b, a] = [float(actor.get("p_o_x_fut", 0.0)), float(actor.get("p_o_y_fut", 0.0))]
+            obj_wl[b, a]     = [float(x) for x in actor["bbox"]]
+            fut_wp_arr = actor.get("fut_wp", None)
+            t_yaw = 0
+            if fut_wp_arr is not None:
+                arr = np.array(fut_wp_arr)
+                if arr.ndim == 3: arr = arr[0]
+                t_len = min(T, arr.shape[0])
+                fut_wp[b, a, :t_len] = arr[:t_len]
+                t_yaw = t_len
+            obj_mask[b, a] = True
+            if edge_by_edge:
+                # Only compute agent_yaws if fut_wp is available and t_len > 0
+                if fut_wp_arr is not None and t_yaw > 0 and "yaw" in actor:
+                    curr_yaw = actor["yaw"]
+                    agent_full_path = np.vstack([p_o[b, a].reshape(1, 2), fut_wp[b, a, :t_yaw]])
+                    yaws = get_stable_yaws(agent_full_path, curr_yaw, threshold=yaw_threshold)
+                    agent_yaws[b, a, :t_yaw+1] = yaws[:t_yaw+1]
+                else:
+                    agent_yaws[b, a, :] = 0.0  # or np.nan if you prefer
+    return p_o, p_o_future, obj_wl, fut_wp, obj_mask, agent_yaws
+
+def _build_ego_traj(path_pred, speed, time_horizon):
+    """Build ego trajectory from path_pred for efficient TTC computation."""
+    B, T, _ = path_pred.shape
+    device = path_pred.device
+    p0 = torch.zeros((B, 1, 2), device=device)
+    path = torch.cat([p0, path_pred], dim=1)  # [B, T+1, 2]
+    cum_dist = torch.linspace(0, T, T + 1, device=device)
+    target_dist = speed * time_horizon
+    # 1. Ego future point at time_horizon [B, 2]
+    path_np = path.cpu().numpy()  # [B, T+1, 2]
+    if isinstance(target_dist, torch.Tensor):
+        target_dist_np = target_dist.cpu().numpy()
+    else:
+        target_dist_np = target_dist
+    p_e_future = np.stack([
+        [np.interp(target_dist_np, cum_dist, path_np[b, :, 0]),
+        np.interp(target_dist_np, cum_dist, path_np[b, :, 1])]
+        for b in range(B)
+    ], axis=0)  # [B, 2]
+
+    # 2. ego trajectory points [B, 20, 2] for fut_wp approach
+    timestamps = torch.linspace(0, time_horizon, 20, device=device)
+    target_dist_points = speed * timestamps
+    p_e_future_points = np.stack([
+        np.stack([
+            np.interp(target_dist_points, cum_dist, path_np[b, :, 0]),
+            np.interp(target_dist_points, cum_dist, path_np[b, :, 1])
+        ], axis=1)  # [N, 2]
+        for b in range(B)
+    ], axis=0)  # [B, N, 2]
+    ego_full_path = np.concatenate([np.zeros((B, 1, 2)), p_e_future_points], axis=1)
+    ego_yaws = np.stack([
+        get_stable_yaws(ego_full_path[b], 0.0, threshold=0.05)
+        for b in range(B)
+    ], axis=0)
+
+    return ego_full_path, p_e_future, p_e_future_points, ego_yaws
+
+def _compute_ttc_for_bin_efficient(
         speed, path_pred, scene_score_info,
         time_horizon, safe_distance,
         coll_radius, ego_wl
     ):
     """
     Batched version: path_pred [B, T, 2], scene_score_info is list of B dicts.
+    This is the efficient version of _compute_ttc that instead of for loop, it 
+    vectorrizes the computation.
     Returns: torch.Tensor of shape [B]
-    Supports batch size but only uses constant velocity model for future position prediction!!
     """
     B, T, _ = path_pred.shape
     device = path_pred.device
     results = []
+    calculation_type = "p_o_fut"  # or "fut_wp" or "fut_wp_edge"
+    # Build ego trajs
+    ego_traj, p_e_future, p_e_future_points, ego_yaws = _build_ego_traj(path_pred, speed, time_horizon)
+    # Build padded actor info
+    p_o_now, p_o_future, obj_wl, fut_wp, obj_mask, agent_yaws = _build_padded_actor_info(
+        scene_score_info, T, edge_by_edge=False, yaw_threshold=0.05
+    )
+    # Match ego traj length to T
+    p_e_now = np.zeros((B, 2), dtype=np.float32)
+
+    # Compute distances
+    if calculation_type == "p_o_fut":
+        distances = _compute_swept_bbox_batched(
+            p_e_now=p_e_now,
+            p_e_future=p_e_future,
+            p_o_now=p_o_now,
+            p_o_future=p_o_future,
+            ego_wl=ego_wl,
+            obj_wl=obj_wl,
+            steps=10 if time_horizon <=1.0 else 20
+        )
+    elif calculation_type == "fut_wp":
+        raise NotImplementedError("Batched version of fut_wp approach with edge by edge distance is not implemented yet.")
+        distances = compute_min_distance_traj_batched(ego_exp, obj_exp, ego_yaws, agent_yaws, ego_wl, obj_wl)
+    elif calculation_type == "fut_wp_edge":
+        raise NotImplementedError("Batched version of fut_wp approach with edge by edge distance is not implemented yet.")
+        distances = compute_min_distance_traj_edge_batched(ego_exp, obj_exp, ego_yaws, agent_yaws, ego_wl, obj_wl)
+    else:        
+        raise ValueError(f"Unknown calculation type: {calculation_type}")
+    
+    min_dists = np.min(distances, axis=1)  # [B]
     for b in range(B):
-        # Ego position and velocity (2D)
-        p_e = np.array([0.0, 0.0])  # Assume ego starts at origin
-
-        # Predict ego position after TIME_HORIZON on the given path
-        target_dist = speed * time_horizon
-        cum_dist = np.arange(T)
-        p_e_future = np.array([
-            np.interp(target_dist, cum_dist, path_pred[b, :, 0].cpu().numpy()),
-            np.interp(target_dist, cum_dist, path_pred[b, :, 1].cpu().numpy())
-        ])
-
-        threat_actor = None
-        min_distance = safe_distance
-        for actor in scene_score_info[b]["actors"]:
-            if not actor["ttc_cal"]:
-                continue
-            if actor["p_o_x_fut"] is None:
-                continue
-            p_o = np.array([actor["p_o_x"], actor["p_o_y"]])
-            p_o_future = np.array([actor["p_o_x_fut"], actor["p_o_y_fut"]])
-            # Convert bbox to list of two numpy floats if needed
-            obj_wl = [float(x) for x in actor["bbox"]]
-            dist_future = _compute_swept_bbox_distance(
-                p_e_now=p_e,
-                p_e_future=p_e_future,
-                p_o_now=p_o,
-                p_o_future=p_o_future,
-                ego_wl=ego_wl,
-                obj_wl=obj_wl,
-                steps=20
-            )
-            if dist_future < min_distance:
-                threat_actor = actor
-                min_distance = dist_future
+        min_distance = min_dists[b]
         if min_distance >= safe_distance:
             results.append(1.0)
         elif min_distance <= coll_radius:
@@ -439,67 +570,6 @@ def _compute_ttc_for_bin_dep_1(
             results.append(ttc)
     return torch.tensor(results, device=device)
 
-def _compute_ttc_for_bin_dep_2(
-        speed, path_pred, scene_score_info,
-        time_horizon, safe_distance,
-        coll_radius, ego_wl
-    ):
-    """
-    It calculates TTC for a given speed and path. 
-    Basically, it predicts where the ego vehicle would be after TIME_HORIZON
-    Only Single Batch compatible!!
-    """
-    # Ego position and velocity (2D)
-    # p_e = np.array([scene_score_info["p_e_x"], scene_score_info["p_e_y"]])
-    p_e = np.array([0.0, 0.0])  # Assume ego starts at origin
-
-    # Predict ego position after TIME_HORIZON on the given path
-    # Here we simply move along the path by speed * time_horizon
-    target_dist = speed * time_horizon
-    cum_dist = np.arange(len(path_pred))
-    p_e_future = np.array([
-        np.interp(target_dist, cum_dist, path_pred[:, 0]),
-        np.interp(target_dist, cum_dist, path_pred[:, 1])
-    ])
-
-    threat_actor = None
-    min_distance = safe_distance
-    for actor in scene_score_info["actors"]:
-        if not actor["ttc_cal"]:
-            continue
-        if actor["p_o_x_fut"] is None: # has disappeared
-            continue
-        # To calculate TTC, we can either use constant velocity model or look at future position
-        p_o = np.array([actor["p_o_x"], actor["p_o_y"]])
-        p_o_future = np.array([actor["p_o_x_fut"], actor["p_o_y_fut"]]) # In 0.5s
-        # Compute distance at future time
-        # dist_future = np.linalg.norm(p_e_future - p_o_future)
-        # dist_future = _get_bbox_distance(
-        #     p_e_future[0], p_e_future[1], self.ego_wl[0], self.ego_wl[1],
-        #     p_o_future[0], p_o_future[1], actor["bbox"][0], actor["bbox"][1]
-        # )
-        dist_future = _compute_swept_bbox_distance(
-            p_e_now=p_e,
-            p_e_future=p_e_future,
-            p_o_now=p_o,
-            p_o_future=p_o_future,
-            ego_wl= ego_wl,
-            obj_wl=actor["bbox"]
-        )
-        if dist_future < min_distance:
-            threat_actor = actor
-            min_distance = dist_future
-    if min_distance >= safe_distance:
-        return torch.tensor(1.0)  # Safe
-    elif min_distance <= coll_radius:
-        # print("Collision imminent: {} - {}".format(threat_actor, min_distance))
-        return torch.tensor(0.0)  # Collision
-    else:
-        # Linear scaling between coll_radius and safe_distance
-        # print("Collision warning: {} - {}".format(threat_actor, min_distance))
-        ttc = (min_distance - coll_radius) / (safe_distance - coll_radius)
-        return torch.tensor(ttc)
-    
 def compute_ttc(path_pred, scene_score_info, speed_bins,
                 time_horizon, safe_distance, coll_radius,
                 ego_wl
@@ -523,45 +593,19 @@ def compute_ttc(path_pred, scene_score_info, speed_bins,
             coll_radius=coll_radius,
             ego_wl=ego_wl,
         )
+        # speed_score = _compute_ttc_for_bin_efficient(
+        #     speed=speed,
+        #     path_pred=path_pred,
+        #     scene_score_info=scene_score_info,
+        #     time_horizon=time_horizon,
+        #     safe_distance=safe_distance,
+        #     coll_radius=coll_radius,
+        #     ego_wl=ego_wl,
+        # )
         ttc.append(speed_score)
     # return torch.stack(ttc).unsqueeze(0)  # Shape: [B, num_classes]
     return torch.stack(ttc, dim=0).T  # Shape: [B, num_bins]
 
-def compute_comfort(speed, speed_bins):
-    """
-    Compute comfort scores based on speed.
-    Here we use a simple quadratic penalty for high speeds.
-    
-    Args:
-        speed: Tensor of shape [B] - current speed in m/s
-    Returns:
-        comfort_scores = torch.clamp(1.0 - (speed / self.speed_bins[-1])**2, min=0.0, max=1.0)
-    """
-    # [num_bins]
-    bins = torch.tensor(
-        speed_bins,
-        dtype=speed.dtype
-    )
-    # [B, num_bins]
-    diff = speed.view(1,1)- bins.unsqueeze(0)
-    # bandwidth controls sharpness (¼ of bin range is a good default)
-    sigma = 0.25 * bins[-1]
-    comfort_scores = torch.exp(-(diff ** 2) / (2 * sigma ** 2))
-    # normalize → proper distribution
-    comfort_scores = comfort_scores / comfort_scores.sum(dim=1, keepdim=True)
-    return comfort_scores
-
-def compute_feasibility(path, speed, speed_bins):
-    """
-    Compute feasibility scores based on path curvature and current speed.
-    """
-    feasibility_scores = []
-    for bin_speed in speed_bins:
-        # Simple heuristic: higher speeds get lower feasibility if path is curvy
-        curvature = torch.mean(torch.abs(path[:, 1:] - path[:, :-1]))  # Simplified curvature measure
-        score = torch.clamp(1.0 - (curvature * bin_speed / 10.0), min=0.0, max=1.0)
-        feasibility_scores.append(score)
-    return torch.stack(feasibility_scores, dim=0).unsqueeze(0)
 
 def _stop_sign_score(speed, distance, speed_bins, proximity_threshold, speed_threshold):
     """
