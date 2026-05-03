@@ -2,6 +2,7 @@
 import math
 import numpy as np
 import torch
+import datetime
 
 
 def _decel_to_score(required_decel, decel_min, decel_max):
@@ -247,6 +248,8 @@ def compute_min_distance_traj(ego_traj, obj_traj, ego_wl, obj_wl, ego_yaws=None,
                 p_o[0], p_o[1], obj_wl[0], obj_wl[1],
                 ego_yaw=ego_yaws[t], obj_yaw=obj_yaws[t]
             )
+            if dist < min_dist:
+                min_dist = dist
         debug = False
         if debug:
             # Visualization: plot ego and agent bounding boxes at each time step using corners
@@ -285,8 +288,11 @@ def compute_min_distance_traj(ego_traj, obj_traj, ego_wl, obj_wl, ego_yaws=None,
             # Write distances as text below the figure
             for t, dist in enumerate(distances):
                 ax.text(0.5, -0.2 - t*0.2, f'Time {t}: Dist={dist:.2f}', transform=ax.transAxes, fontsize=8, color=cmap(t))
-            plt.savefig("debug_swept_bbox_distance.png")
+            now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+            plt.savefig(f"/workspace/temp_vis/bboxes/debug_swept_bbox_distance_{now_str}.png")
             plt.show()
+            plt.close(fig)
+
     return min_dist
 
 def _compute_ttc_for_bin(
@@ -315,17 +321,22 @@ def _compute_ttc_for_bin(
         ])
 
         # Get ego trajectory up to TIME_HORIZON for fut_wp approach
-        timestamps = np.linspace(0, time_horizon, 20)
-        target_dist_points = speed * timestamps
+        dt = time_horizon / 20 
+        future_timestamps = np.linspace(dt, time_horizon, 20)
+        future_target_dists = speed * future_timestamps
+
+        # 3. Interpolate
         p_e_future_points = np.stack([
-            np.interp(target_dist_points, cum_dist, path_pred_b[:, 0]),
-            np.interp(target_dist_points, cum_dist, path_pred_b[:, 1])
-        ], axis=1)  # [T, 2]
+            np.interp(future_target_dists, cum_dist, path_pred_b[:, 0]),
+            np.interp(future_target_dists, cum_dist, path_pred_b[:, 1])
+        ], axis=1)
 
         threat_actor = None
         min_distance = safe_distance
         ego_full_path = np.vstack([p_e.reshape(1, 2), p_e_future_points])
         ego_yaws = get_stable_yaws(ego_full_path, 0.0, threshold=0.05)
+        min_dist_agent_for_debugging = float('inf')
+        p_o_x_min = None
         for actor in scene_score_info[b]["actors"]:
             if not actor["ttc_cal"]:
                 continue
@@ -354,7 +365,7 @@ def _compute_ttc_for_bin(
                 # fut_wp has shape [T, 2], we can directly use it as future trajectory and check swept distance at multiple time steps
                 obj_wl = [float(x) for x in actor["bbox"]]
                 fut_wp = fut_wp[0] if fut_wp.ndim == 3 else fut_wp  # Handle case where fut_wp has extra batch dimension
-                edge_by_edge = False  # Whether to check distance edge by edge or just point to point
+                edge_by_edge = True  # Whether to check distance edge by edge or just point to point
                 if edge_by_edge:
                     curr_yaw = actor["yaw"]
                     # calculate yaw for each time step based on trajectory, then calculate corners for each time step, and check distance between corners and ego box
@@ -370,9 +381,13 @@ def _compute_ttc_for_bin(
                     ego_yaws=ego_yaws if edge_by_edge else None,
                     obj_yaws=agent_yaws if edge_by_edge else None
                 )
+                if dist_future < min_dist_agent_for_debugging:
+                    min_dist_agent_for_debugging = dist_future
+                    p_o_x_min = actor["p_o_x"]
                 if dist_future < min_distance:
                     threat_actor = actor
                     min_distance = dist_future
+        # print(f"Batch {b}, p_o_x_min: {p_o_x_min}, min_dist_agent: {min_dist_agent_for_debugging}")
         if min_distance >= safe_distance:
             results.append(1.0)
         elif min_distance <= coll_radius:
@@ -385,6 +400,158 @@ def _compute_ttc_for_bin(
 ############################################
 #### Utils for batched TTC computations ####
 ############################################
+def get_box_corners_batch(x, y, w, l, yaw):
+    """
+    x, y, w, l, yaw: arrays of shape [N]
+    Returns: corners [N, 4, 2]
+    """
+    N = x.shape[0]
+    # [4, 2] corners in local frame
+    local_corners = np.array([
+        [-0.5, -0.5],
+        [ 0.5, -0.5],
+        [ 0.5,  0.5],
+        [-0.5,  0.5]
+    ])
+    # Scale by width and length
+    corners = np.stack([
+        local_corners[:, 0] * l[:, None],
+        local_corners[:, 1] * w[:, None]
+    ], axis=-1)  # [N, 4, 2]
+    corners = corners.sum(axis=-1)  # [N, 4, 2]
+    # Rotation
+    c = np.cos(yaw)
+    s = np.sin(yaw)
+    rot = np.stack([
+        np.stack([c, -s], axis=-1),
+        np.stack([s,  c], axis=-1)
+    ], axis=-2)  # [N, 2, 2]
+    corners_rot = np.einsum('nij,nkj->nki', rot, corners)  # [N, 4, 2]
+    # Translate
+    corners_rot[..., 0] += x[:, None]
+    corners_rot[..., 1] += y[:, None]
+    return corners_rot  # [N, 4, 2]
+
+def _compute_min_distance_traj_batched(ego_traj, obj_traj, ego_wl, obj_wl, ego_yaws=None, obj_yaws=None):
+    """
+    Fully vectorized batched version (no for-loop over batches).
+    ego_traj: [B, T, 2]
+    obj_traj: [B, A, T, 2]
+    ego_wl: [2] or [B, 2]
+    obj_wl: [B, A, 2]
+    Returns: [B, A] minimum distance for each batch/actor.
+    """
+    if ego_yaws is None:
+        B, T, _ = ego_traj.shape
+        # Broadcast widths/lengths
+        ew = ego_wl if ego_wl.ndim == 2 else np.broadcast_to(ego_wl, (B, 2))
+        ow = obj_wl
+        # ego_traj: [B, T, 2], obj_traj: [B, T, 2]
+        dx = np.abs(ego_traj[..., 0] - obj_traj[..., 0]) - (ew[:, None, 1] + ow[:, None, 1]) / 2
+        dy = np.abs(ego_traj[..., 1] - obj_traj[..., 1]) - (ew[:, None, 0] + ow[:, None, 0]) / 2
+        dx = np.clip(dx, 0, None)
+        dy = np.clip(dy, 0, None)
+        dists = np.sqrt(dx ** 2 + dy ** 2)  # [B, T]
+        min_dists = np.min(dists, axis=1)   # [B]
+        # If any collision at any time, set min_dist to 0
+        min_dists = np.where(np.any(dists == 0, axis=1), 0.0, min_dists)
+        return min_dists
+    else:
+        ego_yaws = ego_yaws[:, 1:]
+        obj_yaws = obj_yaws[:, :, 1:]
+        B, A, T, _ = obj_traj.shape
+        # Expand ego_traj and ego_yaws to [B, A, T, ...]
+        ego_traj_exp = np.expand_dims(ego_traj, axis=1)         # [B, 1, T, 2]
+        ego_traj_exp = np.broadcast_to(ego_traj_exp, (B, A, T, 2))
+        ego_yaws_exp = np.expand_dims(ego_yaws, axis=1)         # [B, 1, T]
+        ego_yaws_exp = np.broadcast_to(ego_yaws_exp, (B, A, T))
+        # Now flatten everything to [B*A*T, ...]
+        N = B * A * T
+        ego_xy = ego_traj_exp.reshape(N, 2)
+        obj_xy = obj_traj.reshape(N, 2)
+        ego_yaw = ego_yaws_exp.reshape(N)
+        obj_yaw = obj_yaws.reshape(N)
+        # Broadcast widths/lengths
+        ew = np.full((N, 2), ego_wl)  # [N, 2]
+        ow = np.repeat(obj_wl, T, axis=1).reshape(N, 2)  # [N, 2]
+
+        ego_w = ew[:, 0]
+        ego_l = ew[:, 1]
+        obj_w = ow[:, 0]
+        obj_l = ow[:, 1]
+        # Compute corners for all
+        # ego_corners = get_box_corners_batch(ego_xy[:, 0], ego_xy[:, 1], ego_w, ego_l, ego_yaw)
+        # obj_corners = get_box_corners_batch(obj_xy[:, 0], obj_xy[:, 1], obj_w, obj_l, obj_yaw)
+        # Now, for each pair, call the SAT/edge-corner logic (still needs a loop)
+        dists = np.zeros(N)
+        all_ego_corners = np.zeros((N, 4, 2))
+        all_corners = np.zeros((N, 4, 2))
+        for i in range(N):
+            # You can optimize by writing a vectorized SAT/edge-corner check, but here we call the original logic
+            dist, ego_corners, corners = _get_bbox_distance(
+                ego_xy[i, 0], ego_xy[i, 1], ego_w[i], ego_l[i],
+                obj_xy[i, 0], obj_xy[i, 1], obj_w[i], obj_l[i],
+                ego_yaw=ego_yaw[i], obj_yaw=obj_yaw[i]
+            )
+            dists[i] = dist
+            all_ego_corners[i] = ego_corners
+            all_corners[i] = corners
+        dists = dists.reshape(B, A, T)
+        min_dists = np.min(dists, axis=2)  # minimum over time
+        collision_mask = np.any(dists == 0, axis=2)  # shape (B, A)
+        min_dists = np.where(collision_mask, 0.0, min_dists)
+        # Add a visualization here to plot bounding boxes over time and their corresponding distances calculated above
+        debug = False
+        if debug:
+            import matplotlib.pyplot as plt
+            import matplotlib.cm as cm
+            for b in range(B):
+                fig, ax = plt.subplots(figsize=(8, 8))
+                cmap = cm.get_cmap('tab10', A)
+                for a in range(A):
+                    # Only plot for agents with initial position less than 30 meters to ego
+                    ego_init = ego_traj[b, 0]
+                    obj_init = obj_traj[b, a, 0]
+                    dist_init = np.linalg.norm(ego_init - obj_init)
+                    if dist_init >= 30.0:
+                        continue
+                    for t in range(T):
+                        color = cmap(a)
+                        # Get corners for ego and object at this timestep
+                        idx = b * A * T + a * T + t
+                        ego_box = all_ego_corners[idx]
+                        obj_box = all_corners[idx]
+                        # Plot ego bounding box
+                        # ego_poly = plt.Polygon(ego_box, closed=True, edgecolor=color, facecolor='none', lw=2, label=f'Ego (A{a})' if t == 0 else None)
+                        # ax.add_patch(ego_poly)
+                        # # Plot object bounding box
+                        # obj_poly = plt.Polygon(obj_box, closed=True, edgecolor=color, facecolor='none', lw=2, linestyle='--', label=f'Obj (A{a})' if t == 0 else None)
+                        # ax.add_patch(obj_poly)
+                        # Plot centers
+                        ax.plot(ego_box[:, 0].mean(), ego_box[:, 1].mean(), 'o', color=color)
+                        ax.plot(obj_box[:, 0].mean(), obj_box[:, 1].mean(), 'x', color=color)
+                        # Annotate distance
+                        ax.text(
+                            obj_box[:, 0].mean(),
+                            obj_box[:, 1].mean(),
+                            f"{float(dists[b,a,t]):.2f}",
+                            color=color,
+                            fontsize=8,
+                            ha='center',
+                            va='bottom'
+                        )
+                ax.set_aspect('equal')
+                ax.set_xlabel('X')
+                ax.set_ylabel('Y')
+                ax.set_title(f'Batch {b}: Ego and Objects Bounding Boxes Over Time')
+                handles, labels = ax.get_legend_handles_labels()
+                by_label = dict(zip(labels, handles))
+                ax.legend(by_label.values(), by_label.keys())
+                plt.savefig(f"/workspace/temp_vis/bboxes/debug_bbox_batch{b}.png")
+                plt.show()
+                plt.close(fig)
+        return min_dists
+        
 
 def _compute_swept_bbox_batched(
     p_e_now, p_e_future, p_o_now, p_o_future, ego_wl, obj_wl, steps=5
@@ -429,7 +596,7 @@ def _compute_swept_bbox_batched(
     min_dists = np.where(np.any(dists == 0, axis=0), 0.0, min_dists)
     return min_dists
 
-def _build_padded_actor_info(scene_score_info, T, edge_by_edge=False, yaw_threshold=0.05):
+def _build_padded_actor_info(scene_score_info, step, edge_by_edge=False, yaw_threshold=0.05):
     """
     Extracts and pads actor info for batched computation.
     Returns:
@@ -445,9 +612,9 @@ def _build_padded_actor_info(scene_score_info, T, edge_by_edge=False, yaw_thresh
     p_o        = np.zeros((B, A_max, 2), dtype=np.float32)
     p_o_future = np.zeros((B, A_max, 2), dtype=np.float32)
     obj_wl     = np.zeros((B, A_max, 2), dtype=np.float32)
-    fut_wp     = np.zeros((B, A_max, T, 2), dtype=np.float32)
+    fut_wp     = np.zeros((B, A_max, step, 2), dtype=np.float32)
     obj_mask   = np.zeros((B, A_max), dtype=bool)
-    agent_yaws = np.zeros((B, A_max, T+1), dtype=np.float32) if edge_by_edge else None
+    agent_yaws = np.zeros((B, A_max, step+1), dtype=np.float32) if edge_by_edge else None
 
     for b, scene in enumerate(scene_score_info):
         for a, actor in enumerate(scene["actors"]):
@@ -457,11 +624,21 @@ def _build_padded_actor_info(scene_score_info, T, edge_by_edge=False, yaw_thresh
             p_o_future[b, a] = [float(actor.get("p_o_x_fut", 0.0)), float(actor.get("p_o_y_fut", 0.0))]
             obj_wl[b, a]     = [float(x) for x in actor["bbox"]]
             fut_wp_arr = actor.get("fut_wp", None)
+            fut_wp_invalid = actor.get("fut_wp_invalid", False)
             t_yaw = 0
-            if fut_wp_arr is not None:
+            if fut_wp_arr is None or fut_wp_invalid:
+                # If fut_wp is missing or invalid, we can optionally fill in a constant velocity prediction based on current and future position
+                # Force scalar conversion to ensure a clean (2,) shape
+                curr_pos = np.array([float(actor["p_o_x"]), float(actor["p_o_y"])])
+                fut_pos  = np.array([float(actor["p_o_x_fut"]), float(actor["p_o_y_fut"])])
+                for t in range(step):
+                    alpha = (t + 1) / step
+                    fut_wp[b, a, t] = curr_pos + alpha * (fut_pos - curr_pos)
+                t_yaw = step
+            else:
                 arr = np.array(fut_wp_arr)
                 if arr.ndim == 3: arr = arr[0]
-                t_len = min(T, arr.shape[0])
+                t_len = min(step, arr.shape[0])
                 fut_wp[b, a, :t_len] = arr[:t_len]
                 t_yaw = t_len
             obj_mask[b, a] = True
@@ -497,12 +674,13 @@ def _build_ego_traj(path_pred, speed, time_horizon):
     ], axis=0)  # [B, 2]
 
     # 2. ego trajectory points [B, 20, 2] for fut_wp approach
-    timestamps = torch.linspace(0, time_horizon, 20, device=device)
-    target_dist_points = speed * timestamps
+    dt = time_horizon / 20
+    future_timestamps = torch.linspace(dt, time_horizon, 20, device=device)
+    future_target_dists = speed * future_timestamps
     p_e_future_points = np.stack([
         np.stack([
-            np.interp(target_dist_points, cum_dist, path_np[b, :, 0]),
-            np.interp(target_dist_points, cum_dist, path_np[b, :, 1])
+            np.interp(future_target_dists, cum_dist, path_np[b, :, 0]),
+            np.interp(future_target_dists, cum_dist, path_np[b, :, 1])
         ], axis=1)  # [N, 2]
         for b in range(B)
     ], axis=0)  # [B, N, 2]
@@ -511,7 +689,6 @@ def _build_ego_traj(path_pred, speed, time_horizon):
         get_stable_yaws(ego_full_path[b], 0.0, threshold=0.05)
         for b in range(B)
     ], axis=0)
-
     return ego_full_path, p_e_future, p_e_future_points, ego_yaws
 
 def _compute_ttc_for_bin_efficient(
@@ -527,13 +704,13 @@ def _compute_ttc_for_bin_efficient(
     """
     B, T, _ = path_pred.shape
     device = path_pred.device
-    results = []
-    calculation_type = "p_o_fut"  # or "fut_wp" or "fut_wp_edge"
+    calculation_type = "fut_wp_edge"  # or "fut_wp" or "fut_wp_edge"
+    edge_by_edge = True if calculation_type == "fut_wp_edge" else False
     # Build ego trajs
-    ego_traj, p_e_future, p_e_future_points, ego_yaws = _build_ego_traj(path_pred, speed, time_horizon)
+    ego_traj, p_e_future, wp_e_fut, ego_yaws = _build_ego_traj(path_pred, speed, time_horizon)
     # Build padded actor info
-    p_o_now, p_o_future, obj_wl, fut_wp, obj_mask, agent_yaws = _build_padded_actor_info(
-        scene_score_info, T, edge_by_edge=False, yaw_threshold=0.05
+    p_o_now, p_o_future, obj_wl, wp_o_fut, obj_mask, agent_yaws = _build_padded_actor_info(
+        scene_score_info, 20, edge_by_edge=edge_by_edge, yaw_threshold=0.05
     )
     # Match ego traj length to T
     p_e_now = np.zeros((B, 2), dtype=np.float32)
@@ -547,20 +724,35 @@ def _compute_ttc_for_bin_efficient(
             p_o_future=p_o_future,
             ego_wl=ego_wl,
             obj_wl=obj_wl,
-            steps=10 if time_horizon <=1.0 else 20
+            steps=10 if time_horizon <= 1.0 else 20
         )
+        # print("Batched distances:", distances)
     elif calculation_type == "fut_wp":
-        raise NotImplementedError("Batched version of fut_wp approach with edge by edge distance is not implemented yet.")
-        distances = compute_min_distance_traj_batched(ego_exp, obj_exp, ego_yaws, agent_yaws, ego_wl, obj_wl)
+        distances = _compute_min_distance_traj_batched(
+            ego_traj=wp_e_fut,
+            obj_traj=wp_o_fut,
+            ego_wl=ego_wl,
+            obj_wl=obj_wl,
+            ego_yaws=None,
+            obj_yaws=None
+        )
     elif calculation_type == "fut_wp_edge":
-        raise NotImplementedError("Batched version of fut_wp approach with edge by edge distance is not implemented yet.")
-        distances = compute_min_distance_traj_edge_batched(ego_exp, obj_exp, ego_yaws, agent_yaws, ego_wl, obj_wl)
-    else:        
+        distances = _compute_min_distance_traj_batched(
+            ego_traj=wp_e_fut,
+            obj_traj=wp_o_fut,
+            ego_wl=ego_wl,
+            obj_wl=obj_wl,
+            ego_yaws=ego_yaws,
+            obj_yaws=agent_yaws
+        )
+    else:
         raise ValueError(f"Unknown calculation type: {calculation_type}")
-    
+    results = []
+    distances = np.where(obj_mask, distances, np.inf)
     min_dists = np.min(distances, axis=1)  # [B]
     for b in range(B):
         min_distance = min_dists[b]
+        # print(f"Batch {b}, min_dist: {min_distance}")
         if min_distance >= safe_distance:
             results.append(1.0)
         elif min_distance <= coll_radius:
@@ -584,16 +776,7 @@ def compute_ttc(path_pred, scene_score_info, speed_bins,
     ttc = []
     for speed in speed_bins:
         # Compute TTC for this bin edge
-        speed_score = _compute_ttc_for_bin(
-            speed=speed,
-            path_pred=path_pred,
-            scene_score_info=scene_score_info,
-            time_horizon=time_horizon,
-            safe_distance=safe_distance,
-            coll_radius=coll_radius,
-            ego_wl=ego_wl,
-        )
-        # speed_score = _compute_ttc_for_bin_efficient(
+        # speed_score = _compute_ttc_for_bin(
         #     speed=speed,
         #     path_pred=path_pred,
         #     scene_score_info=scene_score_info,
@@ -602,6 +785,17 @@ def compute_ttc(path_pred, scene_score_info, speed_bins,
         #     coll_radius=coll_radius,
         #     ego_wl=ego_wl,
         # )
+        # print("org speed_score:", speed_score)
+        speed_score = _compute_ttc_for_bin_efficient(
+            speed=speed,
+            path_pred=path_pred,
+            scene_score_info=scene_score_info,
+            time_horizon=time_horizon,
+            safe_distance=safe_distance,
+            coll_radius=coll_radius,
+            ego_wl=ego_wl,
+        )
+        # print("efficient speed_score:", speed_score)
         ttc.append(speed_score)
     # return torch.stack(ttc).unsqueeze(0)  # Shape: [B, num_classes]
     return torch.stack(ttc, dim=0).T  # Shape: [B, num_bins]
