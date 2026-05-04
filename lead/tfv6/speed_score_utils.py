@@ -3,7 +3,7 @@ import math
 import numpy as np
 import torch
 import datetime
-
+import time
 
 def _decel_to_score(required_decel, decel_min, decel_max):
     """Map required deceleration (m/s^2) to a [0,1] score.
@@ -400,37 +400,65 @@ def _compute_ttc_for_bin(
 ############################################
 #### Utils for batched TTC computations ####
 ############################################
-def get_box_corners_batch(x, y, w, l, yaw):
-    """
-    x, y, w, l, yaw: arrays of shape [N]
-    Returns: corners [N, 4, 2]
-    """
-    N = x.shape[0]
-    # [4, 2] corners in local frame
-    local_corners = np.array([
+def get_corners(x, y, w, l, yaw):
+    c, s = np.cos(yaw), np.sin(yaw)
+    rot = np.stack([np.stack([c, -s], -1),
+                    np.stack([s,  c], -1)], -2)  # (N, 2, 2)
+
+    base = np.array([
         [-0.5, -0.5],
         [ 0.5, -0.5],
         [ 0.5,  0.5],
         [-0.5,  0.5]
-    ])
-    # Scale by width and length
-    corners = np.stack([
-        local_corners[:, 0] * l[:, None],
-        local_corners[:, 1] * w[:, None]
-    ], axis=-1)  # [N, 4, 2]
-    corners = corners.sum(axis=-1)  # [N, 4, 2]
-    # Rotation
-    c = np.cos(yaw)
-    s = np.sin(yaw)
-    rot = np.stack([
-        np.stack([c, -s], axis=-1),
-        np.stack([s,  c], axis=-1)
-    ], axis=-2)  # [N, 2, 2]
-    corners_rot = np.einsum('nij,nkj->nki', rot, corners)  # [N, 4, 2]
-    # Translate
-    corners_rot[..., 0] += x[:, None]
-    corners_rot[..., 1] += y[:, None]
-    return corners_rot  # [N, 4, 2]
+    ])  # (4,2)
+
+    scales = np.stack([l, w], -1)[:, None, :]  # (N,1,2)
+    corners = base[None] * scales              # (N,4,2)
+    return corners @ rot.transpose(0,2,1) + np.stack([x, y], -1)[:, None, :]
+
+def get_edges(corners):
+    return np.stack([corners,
+                     np.roll(corners, -1, axis=1)], axis=2)
+    # (N, 4 edges, 2 points, 2D)
+
+def point_to_seg(P, A, B):
+    AB = B - A
+    AP = P - A
+
+    denom = np.sum(AB * AB, axis=-1)
+    denom = np.clip(denom, 1e-8, None)  # <-- fix
+
+    t = np.sum(AP * AB, axis=-1) / denom
+    t = np.clip(t, 0, 1)[..., None]
+
+    proj = A + t * AB
+    # return np.linalg.norm(P - proj, axis=-1)
+    return np.sum((P - proj)**2, axis=-1)
+
+# ---------- SAT Overlap (vectorized) ----------
+def is_overlapping_eff(ego_c, obj_c):
+    # axes = normals of all edges (ego + obj)
+    def get_axes(c):
+        edges = np.roll(c, -1, axis=1) - c  # (N,4,2)
+        normals = np.stack([-edges[...,1], edges[...,0]], axis=-1)
+        norm = np.linalg.norm(normals, axis=-1, keepdims=True)
+        return normals / np.clip(norm, 1e-8, None)
+
+    axes = np.concatenate([get_axes(ego_c), get_axes(obj_c)], axis=1)  # (N,8,2)
+
+    # project corners onto axes
+    def project(corners, axes):
+        # (N,4,2) · (N,8,2) → (N,8,4)
+        return np.einsum('nkd,nad->nak', corners, axes)
+
+    proj_ego = project(ego_c, axes)
+    proj_obj = project(obj_c, axes)
+
+    ego_min, ego_max = proj_ego.min(axis=-1), proj_ego.max(axis=-1)
+    obj_min, obj_max = proj_obj.min(axis=-1), proj_obj.max(axis=-1)
+
+    overlap = (ego_max >= obj_min) & (obj_max >= ego_min)  # (N,8)
+    return np.all(overlap, axis=1)  # (N,)
 
 def _compute_min_distance_traj_batched(ego_traj, obj_traj, ego_wl, obj_wl, ego_yaws=None, obj_yaws=None):
     """
@@ -480,26 +508,43 @@ def _compute_min_distance_traj_batched(ego_traj, obj_traj, ego_wl, obj_wl, ego_y
         obj_w = ow[:, 0]
         obj_l = ow[:, 1]
         # Compute corners for all
-        # ego_corners = get_box_corners_batch(ego_xy[:, 0], ego_xy[:, 1], ego_w, ego_l, ego_yaw)
-        # obj_corners = get_box_corners_batch(obj_xy[:, 0], obj_xy[:, 1], obj_w, obj_l, obj_yaw)
-        # Now, for each pair, call the SAT/edge-corner logic (still needs a loop)
-        dists = np.zeros(N)
-        all_ego_corners = np.zeros((N, 4, 2))
-        all_corners = np.zeros((N, 4, 2))
-        for i in range(N):
-            # You can optimize by writing a vectorized SAT/edge-corner check, but here we call the original logic
-            dist, ego_corners, corners = _get_bbox_distance(
-                ego_xy[i, 0], ego_xy[i, 1], ego_w[i], ego_l[i],
-                obj_xy[i, 0], obj_xy[i, 1], obj_w[i], obj_l[i],
-                ego_yaw=ego_yaw[i], obj_yaw=obj_yaw[i]
-            )
-            dists[i] = dist
-            all_ego_corners[i] = ego_corners
-            all_corners[i] = corners
-        dists = dists.reshape(B, A, T)
-        min_dists = np.min(dists, axis=2)  # minimum over time
-        collision_mask = np.any(dists == 0, axis=2)  # shape (B, A)
-        min_dists = np.where(collision_mask, 0.0, min_dists)
+        efficient = True
+        if efficient:
+            ego_c = get_corners(ego_xy[:,0], ego_xy[:,1], ego_w, ego_l, ego_yaw)
+            obj_c = get_corners(obj_xy[:,0], obj_xy[:,1], obj_w, obj_l, obj_yaw)
+            # Overlap check
+            overlap_mask = is_overlapping_eff(ego_c, obj_c)
+            ego_e = get_edges(ego_c)
+            obj_e = get_edges(obj_c)
+            # Broadcast
+            d1 = point_to_seg(obj_c[:, :, None, :], ego_e[:, None, :, 0, :], ego_e[:, None, :, 1, :])
+            d2 = point_to_seg(ego_c[:, :, None, :], obj_e[:, None, :, 0, :], obj_e[:, None, :, 1, :])
+
+            min_dist = np.minimum(d1.min(axis=(1,2)), d2.min(axis=(1,2)))
+            min_dist = np.sqrt(min_dist)
+            # apply collision mask
+            min_dist = np.where(overlap_mask, 0.0, min_dist)
+            min_dist = min_dist.reshape(B, A, T)
+            min_dists = np.min(min_dist, axis=2)  # minimum over time
+        else:
+            # Now, for each pair, call the SAT/edge-corner logic (still needs a loop)
+            dists = np.zeros(N)
+            all_ego_corners = np.zeros((N, 4, 2))
+            all_corners = np.zeros((N, 4, 2))
+            for i in range(N):
+                # You can optimize by writing a vectorized SAT/edge-corner check, but here we call the original logic
+                dist, ego_corners, corners = _get_bbox_distance(
+                    ego_xy[i, 0], ego_xy[i, 1], ego_w[i], ego_l[i],
+                    obj_xy[i, 0], obj_xy[i, 1], obj_w[i], obj_l[i],
+                    ego_yaw=ego_yaw[i], obj_yaw=obj_yaw[i]
+                )
+                dists[i] = dist
+                all_ego_corners[i] = ego_corners
+                all_corners[i] = corners
+            dists = dists.reshape(B, A, T)
+            min_dists = np.min(dists, axis=2)  # minimum over time
+            collision_mask = np.any(dists == 0, axis=2)  # shape (B, A)
+            min_dists = np.where(collision_mask, 0.0, min_dists)
         # Add a visualization here to plot bounding boxes over time and their corresponding distances calculated above
         debug = False
         if debug:
