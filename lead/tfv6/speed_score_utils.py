@@ -441,7 +441,7 @@ def get_stable_yaws_multipath(path, initial_yaw, threshold=0.05):
 
     return ego_yaws
 
-def get_corners(xy, w, l, yaw, device=None, dtype=torch.float32):
+def get_corners(xy, w, l, yaw, device=None, dtype=None):
     """
     xy: (N,2)
     w,l,yaw: (N,)
@@ -526,6 +526,8 @@ def _compute_min_distance_traj_batched_multipath(ego_traj, obj_traj, ego_wl, obj
     """
     ego_yaws = ego_yaws[..., 1:]
     obj_yaws = obj_yaws[..., 1:]
+    device = ego_traj.device
+    dtype = ego_traj.dtype
     # obj_traj: [B, A, T, 2]
     # ego_traj: [B, K, S, T, 2]
     # ego_yaws: [B, K, S, T]
@@ -534,11 +536,9 @@ def _compute_min_distance_traj_batched_multipath(ego_traj, obj_traj, ego_wl, obj
     B, K, S, T, _ = ego_traj.shape
     A = obj_traj.shape[1]
 
-    # Expand ego_traj and ego_yaws to [B, K, S, A, T, ...]
-    ego_traj_exp = np.expand_dims(ego_traj, axis=3)         # [B, K, S, 1, T, 2]
-    ego_traj_exp = np.broadcast_to(ego_traj_exp, (B, K, S, A, T, 2))
-    ego_yaws_exp = np.expand_dims(ego_yaws, axis=3)         # [B, K, S, 1, T]
-    ego_yaws_exp = np.broadcast_to(ego_yaws_exp, (B, K, S, A, T))
+    # Expand ego_traj and ego_yaws to [B, K, S, A, T, ...] using torch
+    ego_traj_exp = ego_traj.unsqueeze(3).expand(B, K, S, A, T, 2)    # [B, K, S, A, T, 2]
+    ego_yaws_exp = ego_yaws.unsqueeze(3).expand(B, K, S, A, T)       # [B, K, S, A, T]
 
     # Expand obj_traj and obj_yaws to [B, K, S, A, T, ...]
     obj_traj_exp = np.expand_dims(np.expand_dims(obj_traj, axis=1), axis=1)  # [B, 1, 1, A, T, 2]
@@ -562,16 +562,13 @@ def _compute_min_distance_traj_batched_multipath(ego_traj, obj_traj, ego_wl, obj
     obj_w = ow[:, 0]
     obj_l = ow[:, 1]
     # Eff below
-    device = cuda_device
-    dtype = torch.float16
-    ego_xy = torch.from_numpy(ego_xy).to(device, dtype=dtype)
     obj_xy = torch.from_numpy(obj_xy).to(device, dtype=dtype)
-    ego_w = torch.from_numpy(ego_w).to(device, dtype=dtype)
-    ego_l = torch.from_numpy(ego_l).to(device, dtype=dtype)
-    ego_yaw = torch.from_numpy(ego_yaw).to(device, dtype=dtype)
     obj_w = torch.from_numpy(obj_w).to(device, dtype=dtype)
     obj_l = torch.from_numpy(obj_l).to(device, dtype=dtype)
     obj_yaw = torch.from_numpy(obj_yaw).to(device, dtype=dtype)
+    ego_w = torch.from_numpy(ego_w).to(device, dtype=dtype)
+    ego_l = torch.from_numpy(ego_l).to(device, dtype=dtype)
+    
     N = ego_xy.shape[0]
     # ---------- AABB filter ----------
     ego_c = get_corners(ego_xy, ego_w, ego_l, ego_yaw, device=device, dtype=dtype)

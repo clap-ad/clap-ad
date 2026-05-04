@@ -486,9 +486,7 @@ class SpeedScoringLoss(nn.Module):
         """
         B = path_pred.shape[0]
         cuda_device = path_pred.device
-        path_pred = path_pred.cpu().detach()
-        path_pred_augmented = path_pred_augmented.cpu().detach() if path_pred_augmented is not None else None
-        curr_speed = curr_speed.cpu()
+        # path_pred = path_pred.cpu().detach()
         PATH_NUM = scores_pred.shape[1]
 
         # Compute TTC scores for all paths at once
