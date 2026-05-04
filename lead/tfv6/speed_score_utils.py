@@ -400,67 +400,78 @@ def _compute_ttc_for_bin(
 ############################################
 #### Utils for batched TTC computations ####
 ############################################
-def get_corners(x, y, w, l, yaw):
-    c, s = np.cos(yaw), np.sin(yaw)
-    rot = np.stack([np.stack([c, -s], -1),
-                    np.stack([s,  c], -1)], -2)  # (N, 2, 2)
+def get_corners(xy, w, l, yaw, device=None, dtype=torch.float32):
+    """
+    xy: (N,2)
+    w,l,yaw: (N,)
+    """
+    x, y = xy[:, 0], xy[:, 1]
 
-    base = np.array([
+    c = torch.cos(yaw)
+    s = torch.sin(yaw)
+
+    rot = torch.stack([
+        torch.stack([c, -s], dim=-1),
+        torch.stack([s,  c], dim=-1)
+    ], dim=-2)  # (N,2,2)
+
+    base = torch.tensor([
         [-0.5, -0.5],
         [ 0.5, -0.5],
         [ 0.5,  0.5],
         [-0.5,  0.5]
-    ])  # (4,2)
+    ], device=device, dtype=dtype)  # (4,2)
 
-    scales = np.stack([l, w], -1)[:, None, :]  # (N,1,2)
-    corners = base[None] * scales              # (N,4,2)
-    return corners @ rot.transpose(0,2,1) + np.stack([x, y], -1)[:, None, :]
+    scales = torch.stack([l, w], dim=-1).unsqueeze(1).to(device, dtype=dtype)  # (N,1,2)
+    corners = base.unsqueeze(0) * scales              # (N,4,2)
+
+    return torch.bmm(corners, rot.transpose(1, 2)) + torch.stack([x, y], dim=-1).unsqueeze(1)
 
 def get_edges(corners):
-    return np.stack([corners,
-                     np.roll(corners, -1, axis=1)], axis=2)
-    # (N, 4 edges, 2 points, 2D)
+    # (N,4,2,2)
+    return torch.stack([corners, torch.roll(corners, shifts=-1, dims=1)], dim=2)
+
+def aabb_filter(ego_xy, obj_xy, ego_l, obj_l, ego_w, obj_w):
+    dx = torch.abs(ego_xy[:, 0] - obj_xy[:, 0])
+    dy = torch.abs(ego_xy[:, 1] - obj_xy[:, 1])
+
+    return (dx < (ego_l + obj_l) * 0.5) & (dy < (ego_w + obj_w) * 0.5)
+
+def is_overlapping_eff(ego_c, obj_c):
+    def get_axes(c):
+        edges = torch.roll(c, -1, dims=1) - c  # (N,4,2)
+        normals = torch.stack([-edges[...,1], edges[...,0]], dim=-1)
+        normals = normals / torch.clamp(torch.norm(normals, dim=-1, keepdim=True), 1e-8)
+        return normals
+
+    axes = torch.cat([get_axes(ego_c), get_axes(obj_c)], dim=1)  # (N,8,2)
+
+    def project(c, axes):
+        # (N,4,2) @ (N,8,2)
+        return torch.einsum("nkd,nad->nak", c, axes)
+
+    p1 = project(ego_c, axes)
+    p2 = project(obj_c, axes)
+
+    return torch.all(
+        (p1.max(dim=-1).values >= p2.min(dim=-1).values) &
+        (p2.max(dim=-1).values >= p1.min(dim=-1).values),
+        dim=1
+    )
 
 def point_to_seg(P, A, B):
     AB = B - A
     AP = P - A
 
-    denom = np.sum(AB * AB, axis=-1)
-    denom = np.clip(denom, 1e-8, None)  # <-- fix
+    denom = torch.clamp((AB * AB).sum(dim=-1), min=1e-8)
 
-    t = np.sum(AP * AB, axis=-1) / denom
-    t = np.clip(t, 0, 1)[..., None]
+    t = (AP * AB).sum(dim=-1) / denom
+    t = torch.clamp(t, 0.0, 1.0).unsqueeze(-1)
 
     proj = A + t * AB
-    # return np.linalg.norm(P - proj, axis=-1)
-    return np.sum((P - proj)**2, axis=-1)
+    return ((P - proj) ** 2).sum(dim=-1)  # squared distance (no sqrt)
 
-# ---------- SAT Overlap (vectorized) ----------
-def is_overlapping_eff(ego_c, obj_c):
-    # axes = normals of all edges (ego + obj)
-    def get_axes(c):
-        edges = np.roll(c, -1, axis=1) - c  # (N,4,2)
-        normals = np.stack([-edges[...,1], edges[...,0]], axis=-1)
-        norm = np.linalg.norm(normals, axis=-1, keepdims=True)
-        return normals / np.clip(norm, 1e-8, None)
-
-    axes = np.concatenate([get_axes(ego_c), get_axes(obj_c)], axis=1)  # (N,8,2)
-
-    # project corners onto axes
-    def project(corners, axes):
-        # (N,4,2) · (N,8,2) → (N,8,4)
-        return np.einsum('nkd,nad->nak', corners, axes)
-
-    proj_ego = project(ego_c, axes)
-    proj_obj = project(obj_c, axes)
-
-    ego_min, ego_max = proj_ego.min(axis=-1), proj_ego.max(axis=-1)
-    obj_min, obj_max = proj_obj.min(axis=-1), proj_obj.max(axis=-1)
-
-    overlap = (ego_max >= obj_min) & (obj_max >= ego_min)  # (N,8)
-    return np.all(overlap, axis=1)  # (N,)
-
-def _compute_min_distance_traj_batched(ego_traj, obj_traj, ego_wl, obj_wl, ego_yaws=None, obj_yaws=None):
+def _compute_min_distance_traj_batched(ego_traj, obj_traj, ego_wl, obj_wl, cuda_device, ego_yaws=None, obj_yaws=None):
     """
     Fully vectorized batched version (no for-loop over batches).
     ego_traj: [B, T, 2]
@@ -510,22 +521,54 @@ def _compute_min_distance_traj_batched(ego_traj, obj_traj, ego_wl, obj_wl, ego_y
         # Compute corners for all
         efficient = True
         if efficient:
-            ego_c = get_corners(ego_xy[:,0], ego_xy[:,1], ego_w, ego_l, ego_yaw)
-            obj_c = get_corners(obj_xy[:,0], obj_xy[:,1], obj_w, obj_l, obj_yaw)
-            # Overlap check
-            overlap_mask = is_overlapping_eff(ego_c, obj_c)
-            ego_e = get_edges(ego_c)
-            obj_e = get_edges(obj_c)
-            # Broadcast
-            d1 = point_to_seg(obj_c[:, :, None, :], ego_e[:, None, :, 0, :], ego_e[:, None, :, 1, :])
-            d2 = point_to_seg(ego_c[:, :, None, :], obj_e[:, None, :, 0, :], obj_e[:, None, :, 1, :])
+            device = cuda_device
+            dtype = torch.float16
+            ego_xy = torch.from_numpy(ego_xy).to(device, dtype=dtype)
+            obj_xy = torch.from_numpy(obj_xy).to(device, dtype=dtype)
+            ego_w = torch.from_numpy(ego_w).to(device, dtype=dtype)
+            ego_l = torch.from_numpy(ego_l).to(device, dtype=dtype)
+            ego_yaw = torch.from_numpy(ego_yaw).to(device, dtype=dtype)
+            obj_w = torch.from_numpy(obj_w).to(device, dtype=dtype)
+            obj_l = torch.from_numpy(obj_l).to(device, dtype=dtype)
+            obj_yaw = torch.from_numpy(obj_yaw).to(device, dtype=dtype)
+            N = ego_xy.shape[0]
+            # ---------- AABB filter ----------
+            ego_c = get_corners(ego_xy, ego_w, ego_l, ego_yaw, device=device, dtype=dtype)
+            obj_c = get_corners(obj_xy, obj_w, obj_l, obj_yaw, device=device, dtype=dtype)
 
-            min_dist = np.minimum(d1.min(axis=(1,2)), d2.min(axis=(1,2)))
-            min_dist = np.sqrt(min_dist)
-            # apply collision mask
-            min_dist = np.where(overlap_mask, 0.0, min_dist)
+            overlap = is_overlapping_eff(ego_c, obj_c)
+            min_dist = torch.full((N,), float("inf"), device=device, dtype=dtype)
+            # 1. overlapping → 0
+            min_dist[overlap] = 0.0
+            # 2. compute only for non-overlapping
+            non_overlap = ~overlap
+            idx = non_overlap.nonzero(as_tuple=True)[0]
+            if idx.numel() > 0:
+                ego_c_f = ego_c[idx]
+                obj_c_f = obj_c[idx]
+                ego_e_f = get_edges(ego_c_f)
+                obj_e_f = get_edges(obj_c_f)
+                d1 = point_to_seg(
+                    obj_c_f[:, :, None, :],
+                    ego_e_f[:, None, :, 0, :],
+                    ego_e_f[:, None, :, 1, :]
+                )
+
+                d2 = point_to_seg(
+                    ego_c_f[:, :, None, :],
+                    obj_e_f[:, None, :, 0, :],
+                    obj_e_f[:, None, :, 1, :]
+                )
+
+                dist_f = torch.minimum(
+                    torch.amin(d1, dim=(1, 2)),
+                    torch.amin(d2, dim=(1, 2))
+                ).to(dtype=dtype)
+
+                min_dist[idx] = dist_f
             min_dist = min_dist.reshape(B, A, T)
-            min_dists = np.min(min_dist, axis=2)  # minimum over time
+            # minimum over time in torch
+            min_dists = torch.min(min_dist, dim=2).values  # shape (B, A)
         else:
             # Now, for each pair, call the SAT/edge-corner logic (still needs a loop)
             dists = np.zeros(N)
@@ -698,7 +741,7 @@ def _build_padded_actor_info(scene_score_info, step, edge_by_edge=False, yaw_thr
                     agent_yaws[b, a, :] = 0.0  # or np.nan if you prefer
     return p_o, p_o_future, obj_wl, fut_wp, obj_mask, agent_yaws
 
-def _build_ego_traj(path_pred, speed, time_horizon):
+def _build_ego_traj(path_pred, speed, time_horizon, steps=20):
     """Build ego trajectory from path_pred for efficient TTC computation."""
     B, T, _ = path_pred.shape
     device = path_pred.device
@@ -719,8 +762,8 @@ def _build_ego_traj(path_pred, speed, time_horizon):
     ], axis=0)  # [B, 2]
 
     # 2. ego trajectory points [B, 20, 2] for fut_wp approach
-    dt = time_horizon / 20
-    future_timestamps = torch.linspace(dt, time_horizon, 20, device=device)
+    dt = time_horizon / steps
+    future_timestamps = torch.linspace(dt, time_horizon, steps, device=device)
     future_target_dists = speed * future_timestamps
     p_e_future_points = np.stack([
         np.stack([
@@ -739,7 +782,7 @@ def _build_ego_traj(path_pred, speed, time_horizon):
 def _compute_ttc_for_bin_efficient(
         speed, path_pred, scene_score_info,
         time_horizon, safe_distance,
-        coll_radius, ego_wl
+        coll_radius, ego_wl, cuda_device
     ):
     """
     Batched version: path_pred [B, T, 2], scene_score_info is list of B dicts.
@@ -788,13 +831,16 @@ def _compute_ttc_for_bin_efficient(
             ego_wl=ego_wl,
             obj_wl=obj_wl,
             ego_yaws=ego_yaws,
-            obj_yaws=agent_yaws
+            obj_yaws=agent_yaws,
+            cuda_device=cuda_device
         )
     else:
         raise ValueError(f"Unknown calculation type: {calculation_type}")
     results = []
-    distances = np.where(obj_mask, distances, np.inf)
-    min_dists = np.min(distances, axis=1)  # [B]
+    # distances = np.where(obj_mask, distances, np.inf)
+    # min_dists = np.min(distances, axis=1)  # [B]
+    distances = torch.where(torch.from_numpy(obj_mask).to(distances.device), distances, torch.tensor(float('inf'), device=distances.device, dtype=distances.dtype))
+    min_dists, _ = torch.min(distances, dim=1)  # [B]
     for b in range(B):
         min_distance = min_dists[b]
         # print(f"Batch {b}, min_dist: {min_distance}")
@@ -809,7 +855,7 @@ def _compute_ttc_for_bin_efficient(
 
 def compute_ttc(path_pred, scene_score_info, speed_bins,
                 time_horizon, safe_distance, coll_radius,
-                ego_wl
+                ego_wl, cuda_device
     ):
     """
     Compute time-to-collision (TTC) for self.speed_bins based on scene information.
@@ -839,6 +885,7 @@ def compute_ttc(path_pred, scene_score_info, speed_bins,
             safe_distance=safe_distance,
             coll_radius=coll_radius,
             ego_wl=ego_wl,
+            cuda_device=cuda_device
         )
         # print("efficient speed_score:", speed_score)
         ttc.append(speed_score)
