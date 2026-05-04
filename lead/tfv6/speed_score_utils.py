@@ -1088,7 +1088,7 @@ def _compute_ttc_for_bin_efficient_multipath(
     Return: torch.Tensor of shape [B, K, S] with TTC values for each batch and path prediction, over different speed bins.
     """
     B, K, T, _ = path_pred.shape
-    device = path_pred.device
+    device = cuda_device
     calculation_type = "fut_wp_edge"  # or "fut_wp" or "fut_wp_edge"
     edge_by_edge = True if calculation_type == "fut_wp_edge" else False
     # Build ego trajs for all path predictions and speed bins
