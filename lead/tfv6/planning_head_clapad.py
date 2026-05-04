@@ -491,51 +491,76 @@ class SpeedScoringLoss(nn.Module):
         curr_speed = curr_speed.cpu()
         PATH_NUM = scores_pred.shape[1]
 
-        combined_scores = []
-        for i in range(PATH_NUM):
-            if path_pred_augmented is not None:
-                path_pred_i = path_pred_augmented[:,i]
-            else:
-                path_pred_i = path_pred
+        # Compute TTC scores for all paths at once
+        if path_pred_augmented is not None:
+            # skip last path_pred_augmented
+            path_pred_augmented = path_pred_augmented[:, :PATH_NUM, :, :]  # [B, K, T, 2]
             ttc_scores = compute_ttc(
-                path_pred=path_pred_i, # [B, T, 2]
-                scene_score_info=scene_score_info, # List of B size
+                path_pred=path_pred_augmented,  # [B, K, T, 2]
+                scene_score_info=scene_score_info,
                 speed_bins=self.speed_bins,
                 time_horizon=self.time_horizon,
                 safe_distance=self.safe_distance,
                 coll_radius=self.coll_radius,
                 ego_wl=self.ego_wl,
                 cuda_device=cuda_device
-            )  # Shape: [B, S_CLS]
-            # traffic lights
-            traffic_light_scores = compute_traffic_light_adherence(
+            )  # [B, K, S_CLS]
+        else:
+            # If no augmentation, expand path_pred to [B, 1, T, 2] for consistent indexing
+            path_pred_exp = path_pred.unsqueeze(1)
+            ttc_scores = compute_ttc(
+                path_pred=path_pred_exp,  # [B, 1, T, 2]
+                scene_score_info=scene_score_info,
+                speed_bins=self.speed_bins,
+                time_horizon=self.time_horizon,
+                safe_distance=self.safe_distance,
+                coll_radius=self.coll_radius,
+                ego_wl=self.ego_wl,
+                cuda_device=cuda_device
+            )  # [B, 1, S_CLS]
+
+        # Compute other scores once (not per path)
+        traffic_light_scores = compute_traffic_light_adherence(
+            speed_bins=self.speed_bins,
+            scene_score_info=scene_score_info,
+            stop_distance_from_trigger=self.tl_stop_distance,
+            decel_min=self.traffic_rule_decel_min,
+            decel_max=self.traffic_rule_decel_max,
+        )  # [B, S_CLS]
+        stop_sign_scores = compute_stop_sign_adherence(
+            speed_bins=self.speed_bins,
+            scene_score_info=scene_score_info,
+            stop_distance_from_trigger=self.ss_stop_distance,
+            decel_min=self.traffic_rule_decel_min,
+            decel_max=self.traffic_rule_decel_max,
+        )  # [B, S_CLS]
+        if self.use_ot:
+            overtake_scores = compute_overtake_adherence(
                 speed_bins=self.speed_bins,
                 scene_score_info=scene_score_info,
-                stop_distance_from_trigger=self.tl_stop_distance,
-                decel_min=self.traffic_rule_decel_min,
-                decel_max=self.traffic_rule_decel_max,
-            )  # Shape: [3, S_CLS]
-            stop_sign_scores = compute_stop_sign_adherence(
-                speed_bins=self.speed_bins,
-                scene_score_info=scene_score_info,
-                stop_distance_from_trigger=self.ss_stop_distance,
-                decel_min=self.traffic_rule_decel_min,
-                decel_max=self.traffic_rule_decel_max,
-            )  # Shape: [3, S_CLS]
-            if self.use_ot:
-                overtake_scores = compute_overtake_adherence(
-                    speed_bins=self.speed_bins,
-                    scene_score_info=scene_score_info,
-                    stop_distance_from_trigger=self.ot_stop_distance,
-                    decel_min=self.ot_decel_min,
-                    decel_max=self.ot_decel_max,
-                )  # Shape: [3, S_CLS]
+                stop_distance_from_trigger=self.ot_stop_distance,
+                decel_min=self.ot_decel_min,
+                decel_max=self.ot_decel_max,
+            )  # [B, S_CLS]
 
-
-            # NOTE: Do not change order of scores (without changing HydraSpeedHead output order)
-            combined = torch.stack([ttc_scores, traffic_light_scores, stop_sign_scores], dim=1)  # [B, H, S_CLS]
+        # Stack all scores for each path
+        combined_scores = []
+        for i in range(ttc_scores.shape[1]):  # K
+            ttc_score_i = ttc_scores[:, i, :]  # [B, S_CLS]
+            # Expand other scores to match [B, 1, S_CLS] if needed
+            tl_score = traffic_light_scores
+            ss_score = stop_sign_scores
+            if tl_score.dim() == 2:
+                tl_score = tl_score.unsqueeze(1)
+            if ss_score.dim() == 2:
+                ss_score = ss_score.unsqueeze(1)
             if self.use_ot:
-                combined = torch.cat([combined, overtake_scores.unsqueeze(1)], dim=1) # [B, H+1, S_CLS]
+                ot_score = overtake_scores
+                if ot_score.dim() == 2:
+                    ot_score = ot_score.unsqueeze(1)
+                combined = torch.stack([ttc_score_i, tl_score.squeeze(1), ss_score.squeeze(1), ot_score.squeeze(1)], dim=1)  # [B, H, S_CLS]
+            else:
+                combined = torch.stack([ttc_score_i, tl_score.squeeze(1), ss_score.squeeze(1)], dim=1)  # [B, H, S_CLS]
             combined_scores.append(combined)
 
 

@@ -400,6 +400,47 @@ def _compute_ttc_for_bin(
 ############################################
 #### Utils for batched TTC computations ####
 ############################################
+
+def get_stable_yaws_multipath(path, initial_yaw, threshold=0.05):
+    """
+    Stabilizes yaws same as get_stable_yaws but for a batch of paths.
+    path: [B, K, S, N+1, 2] where B=batch size, K=number of paths, S=number of scenes, N+1=time steps (including current position)
+    Return:
+    ego_yaws: [B, K, S, N+1] stable yaws for each path and time step
+    """
+    # differences
+    diffs = path[..., 1:, :] - path[..., :-1, :]  # [B,K,S,N,2]
+
+    dx = diffs[..., 0]
+    dy = diffs[..., 1]
+
+    dist = torch.sqrt(dx**2 + dy**2)  # [B,K,S,N]
+
+    # candidate yaws from motion
+    cand_yaw = torch.atan2(dy, dx)  # [B,K,S,N]
+
+    # mask where movement is significant
+    valid = dist > threshold  # [B,K,S,N]
+
+    # initialize yaw tensor
+    B, K, S, N = cand_yaw.shape
+    ego_yaws = torch.zeros((B, K, S, N + 1), device=path.device)
+
+    ego_yaws[..., 0] = initial_yaw
+
+    # propagate yaw (sequential over time, vectorized over B,K,S)
+    for t in range(N):
+        prev = ego_yaws[..., t]
+        curr = cand_yaw[..., t]
+        ego_yaws[..., t + 1] = torch.where(valid[..., t], curr, prev)
+
+    # unwrap (vectorized)
+    delta = ego_yaws[..., 1:] - ego_yaws[..., :-1]
+    delta = (delta + torch.pi) % (2 * torch.pi) - torch.pi
+    ego_yaws[..., 1:] = ego_yaws[..., 0:1] + torch.cumsum(delta, dim=-1)
+
+    return ego_yaws
+
 def get_corners(xy, w, l, yaw, device=None, dtype=torch.float32):
     """
     xy: (N,2)
@@ -470,6 +511,175 @@ def point_to_seg(P, A, B):
 
     proj = A + t * AB
     return ((P - proj) ** 2).sum(dim=-1)  # squared distance (no sqrt)
+
+
+def _compute_min_distance_traj_batched_multipath(ego_traj, obj_traj, ego_wl, obj_wl, cuda_device, ego_yaws, obj_yaws):
+    """
+    Fully vectorized batched version (no for-loop over batches).
+    ego_traj: [B, K, S, T, 2]
+    obj_traj: [B, A, T, 2]
+    ego_wl: [2]
+    obj_wl: [B, A, 2]
+    ego_yaws: [B, K, S, T+1]
+    obj_yaws: [B, A, T+1]
+    Returns: [B, K, S, A] minimum distance for each batch/actor.
+    """
+    ego_yaws = ego_yaws[..., 1:]
+    obj_yaws = obj_yaws[..., 1:]
+    # obj_traj: [B, A, T, 2]
+    # ego_traj: [B, K, S, T, 2]
+    # ego_yaws: [B, K, S, T]
+    # obj_yaws: [B, A, T]
+
+    B, K, S, T, _ = ego_traj.shape
+    A = obj_traj.shape[1]
+
+    # Expand ego_traj and ego_yaws to [B, K, S, A, T, ...]
+    ego_traj_exp = np.expand_dims(ego_traj, axis=3)         # [B, K, S, 1, T, 2]
+    ego_traj_exp = np.broadcast_to(ego_traj_exp, (B, K, S, A, T, 2))
+    ego_yaws_exp = np.expand_dims(ego_yaws, axis=3)         # [B, K, S, 1, T]
+    ego_yaws_exp = np.broadcast_to(ego_yaws_exp, (B, K, S, A, T))
+
+    # Expand obj_traj and obj_yaws to [B, K, S, A, T, ...]
+    obj_traj_exp = np.expand_dims(np.expand_dims(obj_traj, axis=1), axis=1)  # [B, 1, 1, A, T, 2]
+    obj_traj_exp = np.broadcast_to(obj_traj_exp, (B, K, S, A, T, 2))
+    obj_yaws_exp = np.expand_dims(np.expand_dims(obj_yaws, axis=1), axis=1)  # [B, 1, 1, A, T]
+    obj_yaws_exp = np.broadcast_to(obj_yaws_exp, (B, K, S, A, T))
+
+    # Now flatten everything to [B*K*S*A*T, ...]
+    N = B * K * S * A * T
+    ego_xy = ego_traj_exp.reshape(N, 2)
+    obj_xy = obj_traj_exp.reshape(N, 2)
+    ego_yaw = ego_yaws_exp.reshape(N)
+    obj_yaw = obj_yaws_exp.reshape(N)
+
+    # Broadcast widths/lengths
+    ew = np.full((N, 2), ego_wl)  # [N, 2]
+    ow = np.broadcast_to(obj_wl[:, None, None, :, None, :], (B, K, S, A, T, 2)).reshape(N, 2)  # [N, 2]
+
+    ego_w = ew[:, 0]
+    ego_l = ew[:, 1]
+    obj_w = ow[:, 0]
+    obj_l = ow[:, 1]
+    # Eff below
+    device = cuda_device
+    dtype = torch.float16
+    ego_xy = torch.from_numpy(ego_xy).to(device, dtype=dtype)
+    obj_xy = torch.from_numpy(obj_xy).to(device, dtype=dtype)
+    ego_w = torch.from_numpy(ego_w).to(device, dtype=dtype)
+    ego_l = torch.from_numpy(ego_l).to(device, dtype=dtype)
+    ego_yaw = torch.from_numpy(ego_yaw).to(device, dtype=dtype)
+    obj_w = torch.from_numpy(obj_w).to(device, dtype=dtype)
+    obj_l = torch.from_numpy(obj_l).to(device, dtype=dtype)
+    obj_yaw = torch.from_numpy(obj_yaw).to(device, dtype=dtype)
+    N = ego_xy.shape[0]
+    # ---------- AABB filter ----------
+    ego_c = get_corners(ego_xy, ego_w, ego_l, ego_yaw, device=device, dtype=dtype)
+    obj_c = get_corners(obj_xy, obj_w, obj_l, obj_yaw, device=device, dtype=dtype)
+
+    overlap = is_overlapping_eff(ego_c, obj_c)
+    min_dist = torch.full((N,), float("inf"), device=device, dtype=dtype)
+    # 1. overlapping → 0
+    min_dist[overlap] = 0.0
+    # 2. compute only for non-overlapping
+    non_overlap = ~overlap
+    idx = non_overlap.nonzero(as_tuple=True)[0]
+    if idx.numel() > 0:
+        ego_c_f = ego_c[idx]
+        obj_c_f = obj_c[idx]
+        ego_e_f = get_edges(ego_c_f)
+        obj_e_f = get_edges(obj_c_f)
+        d1 = point_to_seg(
+            obj_c_f[:, :, None, :],
+            ego_e_f[:, None, :, 0, :],
+            ego_e_f[:, None, :, 1, :]
+        )
+
+        d2 = point_to_seg(
+            ego_c_f[:, :, None, :],
+            obj_e_f[:, None, :, 0, :],
+            obj_e_f[:, None, :, 1, :]
+        )
+
+        dist_f = torch.minimum(
+            torch.amin(d1, dim=(1, 2)),
+            torch.amin(d2, dim=(1, 2))
+        ).to(dtype=dtype)
+
+        min_dist[idx] = dist_f
+    min_dist = torch.sqrt(min_dist)  # shape (N,)
+    min_dist = min_dist.reshape(B, K, S, A, T)
+    # minimum over time in torch
+    min_dists = torch.min(min_dist, dim=4).values  # shape (B, K, S, A)
+    # Add a visualization here to plot bounding boxes over time and their corresponding distances calculated above
+    debug = False
+    if debug:
+        import matplotlib.pyplot as plt
+        import matplotlib.cm as cm
+        # Plot for arbitrary K and S (number of paths and speed bins)
+        # ego_traj: [B, K, S, T, 2], obj_traj: [B, A, T, 2]
+        # ego_c, obj_c: [N, 4, 2], where N = B*K*S*A*T
+        # min_dist: [B, K, S, A, T]
+        max_batches = min(2, B)  # Limit number of batches to plot
+        max_k = min(2, K)
+        max_s = min(2, S)
+        for b in range(max_batches):
+            for k in range(max_k):
+                for s in range(max_s):
+                    fig, ax = plt.subplots(figsize=(8, 8))
+                    cmap = cm.get_cmap('tab10', A)
+                    for a in range(A):
+                        # Only plot for agents with initial position less than 30 meters to ego
+                        ego_init = ego_traj[b, k, s, 0]  # [2]
+                        obj_init = obj_traj[b, a, 0]     # [2]
+                        for t in range(T):
+                            color = cmap(a)
+                            # Compute flat index for ego_c/obj_c
+                            idx = (
+                                b * K * S * A * T +
+                                k * S * A * T +
+                                s * A * T +
+                                a * T +
+                                t
+                            )
+                            ego_box = ego_c[idx].cpu().numpy()
+                            obj_box = obj_c[idx].cpu().numpy()
+                            # Plot ego bounding box (full polygon)
+                            ax.plot(
+                                np.append(ego_box[:, 0], ego_box[0, 0]),
+                                np.append(ego_box[:, 1], ego_box[0, 1]),
+                                '-', color=color, lw=2, label=f'Ego (A{a})' if t == 0 else None
+                            )
+                            # Plot object bounding box (full polygon)
+                            ax.plot(
+                                np.append(obj_box[:, 0], obj_box[0, 0]),
+                                np.append(obj_box[:, 1], obj_box[0, 1]),
+                                '--', color=color, lw=2, label=f'Obj (A{a})' if t == 0 else None
+                            )
+                            # Plot centers
+                            ax.plot(ego_box[:, 0].mean(), ego_box[:, 1].mean(), 'o', color=color)
+                            ax.plot(obj_box[:, 0].mean(), obj_box[:, 1].mean(), 'x', color=color)
+                            # Annotate distance
+                            ax.text(
+                                obj_box[:, 0].mean(),
+                                obj_box[:, 1].mean(),
+                                f"{float(min_dist[b, k, s, a, t]):.2f}",
+                                color=color,
+                                fontsize=8,
+                                ha='center',
+                                va='bottom'
+                            )
+                    ax.set_aspect('equal')
+                    ax.set_xlabel('X')
+                    ax.set_ylabel('Y')
+                    ax.set_title(f'Batch {b}, Path {k}, SpeedBin {s}: Ego and Objects Bounding Boxes Over Time')
+                    handles, labels = ax.get_legend_handles_labels()
+                    by_label = dict(zip(labels, handles))
+                    ax.legend(by_label.values(), by_label.keys())
+                    plt.savefig(f"/workspace/temp_vis/bboxes/debug_bbox_batch{b}_k{k}_s{s}.png")
+                    plt.show()
+                    plt.close(fig)
+    return min_dists
 
 def _compute_min_distance_traj_batched(ego_traj, obj_traj, ego_wl, obj_wl, cuda_device, ego_yaws=None, obj_yaws=None):
     """
@@ -742,7 +952,11 @@ def _build_padded_actor_info(scene_score_info, step, edge_by_edge=False, yaw_thr
     return p_o, p_o_future, obj_wl, fut_wp, obj_mask, agent_yaws
 
 def _build_ego_traj(path_pred, speed, time_horizon, steps=20):
-    """Build ego trajectory from path_pred for efficient TTC computation."""
+    """
+        Build ego trajectory from path_pred for efficient TTC computation.
+        path_pred: [B, T, 2] predicted waypoints relative to current position (0,0)
+        speed: scalar value for ego speed
+    """
     B, T, _ = path_pred.shape
     device = path_pred.device
     p0 = torch.zeros((B, 1, 2), device=device)
@@ -778,6 +992,142 @@ def _build_ego_traj(path_pred, speed, time_horizon, steps=20):
         for b in range(B)
     ], axis=0)
     return ego_full_path, p_e_future, p_e_future_points, ego_yaws
+
+def _build_ego_traj_multipath(path_pred, speed, time_horizon, steps=20):
+    """
+        Build ego traj for each of multiple path_pred and multiple speed bins provided.
+        path_pred: [B, K, T, 2], B=batch size, K=number of path predictions per batch, T=number of waypoints, 2 for x,y
+        speed: [S] S is number of speed bins
+        Note: we want to apply each of the speed bins to every path prediction, so we will end up with B x K x S trajectories.
+        It is in vectorized form, so we will not actually loop over B, K, S, but we will compute everything in a batched manner.
+    """
+    B, K, T, _ = path_pred.shape
+    S = speed.shape[0]
+    device = path_pred.device
+
+    # prepend origin
+    p0 = torch.zeros((B, K, 1, 2), device=device)
+    path = torch.cat([p0, path_pred], dim=2)  # [B, K, T+1, 2]
+
+    # cumulative "distance" parameter (same as before)
+    cum_dist = torch.linspace(0, T, T + 1, device=device)  # [T+1]
+
+    # time setup
+    dt = time_horizon / steps
+    future_timestamps = torch.linspace(dt, time_horizon, steps, device=device)  # [N]
+
+    # distances for each speed bin
+    future_target_dists = speed[:, None] * future_timestamps[None, :]  # [S, N]
+
+    # expand for vectorized interpolation
+    path_x = path[..., 0]  # [B, K, T+1]
+    path_y = path[..., 1]  # [B, K, T+1]
+
+    # reshape for broadcasting
+    cum_dist = cum_dist.view(1, 1, 1, T + 1)
+    cum_dist_exp = cum_dist.view(1, 1, 1, -1).repeat(B, K, S, 1)  # already contiguous
+    target = future_target_dists.view(1, 1, S, steps)        # [1,1,S,N]
+    target = target.repeat(B, K, 1, 1)  # already contiguous
+    # find segment indices
+    idx = torch.searchsorted(cum_dist_exp, target, right=True) - 1
+    idx = idx.clamp(min=0, max=T-1)
+
+    # gather segment endpoints
+    idx0 = idx
+    idx1 = idx + 1
+
+    def gather(tensor, idx):
+        return torch.gather(
+            tensor.unsqueeze(2).expand(-1, -1, S, -1),
+            dim=3,
+            index=idx
+        )
+
+    x0 = gather(path_x, idx0)
+    x1 = gather(path_x, idx1)
+    y0 = gather(path_y, idx0)
+    y1 = gather(path_y, idx1)
+
+    d0 = cum_dist[..., :-1].expand(B, K, S, -1).gather(3, idx0)
+    d1 = cum_dist[..., 1:].expand(B, K, S, -1).gather(3, idx0)
+
+    # linear interpolation
+    w = (target - d0) / (d1 - d0 + 1e-8)
+
+    interp_x = x0 + w * (x1 - x0)
+    interp_y = y0 + w * (y1 - y0)
+
+    p_e_future_points = torch.stack([interp_x, interp_y], dim=-1)  # [B,K,S,N,2]
+
+    # prepend origin
+    zeros = torch.zeros((B, K, S, 1, 2), device=device)
+    ego_full_path = torch.cat([zeros, p_e_future_points], dim=3)  # [B,K,S,N+1,2]
+    ego_yaws = get_stable_yaws_multipath(ego_full_path, initial_yaw=0.0, threshold=0.05)
+    # yaw computation (still loop per batch element)
+    # ego_yaws = torch.stack([
+    #     torch.stack([
+    #         torch.stack([
+    #             torch.tensor(get_stable_yaws(ego_full_path[b, k, s].cpu().numpy(), 0.0, threshold=0.05))
+    #             for s in range(S)
+    #         ])
+    #         for k in range(K)
+    #     ])
+    #     for b in range(B)
+    # ])
+
+    return ego_full_path, None, p_e_future_points, ego_yaws
+
+
+def _compute_ttc_for_bin_efficient_multipath(
+        speed, path_pred, scene_score_info,
+        time_horizon, safe_distance,
+        coll_radius, ego_wl, cuda_device
+    ):
+    """Efficient multipath version: path_pred [B, K, T, 2], scene_score_info is list of B dicts.
+    speed: [S] speed bins
+    Return: torch.Tensor of shape [B, K, S] with TTC values for each batch and path prediction, over different speed bins.
+    """
+    B, K, T, _ = path_pred.shape
+    device = path_pred.device
+    calculation_type = "fut_wp_edge"  # or "fut_wp" or "fut_wp_edge"
+    edge_by_edge = True if calculation_type == "fut_wp_edge" else False
+    # Build ego trajs for all path predictions and speed bins
+    ego_traj, p_e_future, wp_e_fut, ego_yaws = _build_ego_traj_multipath(path_pred, speed, time_horizon, steps=20)
+    # Build padded actor info
+    p_o_now, p_o_future, obj_wl, wp_o_fut, obj_mask, agent_yaws = _build_padded_actor_info(
+        scene_score_info, 20, edge_by_edge=edge_by_edge, yaw_threshold=0.05
+    )
+    # Compute distances for all path predictions and speed bins
+    # for now only has been implemented for fut_wp_edge, but can be implemented for other calculation types as well
+    if calculation_type == "fut_wp_edge":
+        distances = _compute_min_distance_traj_batched_multipath(
+            ego_traj=wp_e_fut, # [B, K, S, N, 2]
+            obj_traj=wp_o_fut, # [B, A, N, 2]
+            ego_wl=ego_wl, # [2]
+            obj_wl=obj_wl, # [B, A, 2]
+            ego_yaws=ego_yaws, # [B, K, S, N+1]
+            obj_yaws=agent_yaws, # [B, A, N+1]
+            cuda_device=cuda_device
+        )
+    else:
+        raise ValueError(f"Unknown calculation type: {calculation_type}")
+    # Mask out invalid actors
+    # distances: [B, K, S, A], obj_mask: [B, A] -> need to expand obj_mask to [B, 1, 1, A] for broadcasting
+    obj_mask_exp = torch.from_numpy(obj_mask[:, None, None, :]).to(distances.device)
+    distances = torch.where(obj_mask_exp, distances, torch.tensor(float('inf'), device=distances.device, dtype=distances.dtype))
+    min_dists, _ = torch.min(distances, dim=3)  # [B, K, S]
+    # Now compute TTC based on min_dists
+    ttc = torch.where(
+        min_dists >= safe_distance,
+        torch.tensor(1.0, device=device),
+        torch.where(
+            min_dists <= coll_radius,
+            torch.tensor(0.0, device=device),
+            (min_dists - coll_radius) / (safe_distance - coll_radius)
+        )
+    )
+    # move to cpu:
+    return ttc.cpu()
 
 def _compute_ttc_for_bin_efficient(
         speed, path_pred, scene_score_info,
@@ -859,11 +1209,23 @@ def compute_ttc(path_pred, scene_score_info, speed_bins,
     ):
     """
     Compute time-to-collision (TTC) for self.speed_bins based on scene information.
+    path_pred: Tensor of shape [B, K, T, 2] - predicted future path of the ego vehicle, B is batch size, K is number of path predictions, T is time steps
     
     Args:
         scene_info: Tensor of shape [B] - scene information for the current step
     """
     # Compute TTC for each speed bin based on scene information
+    ttc = _compute_ttc_for_bin_efficient_multipath(
+        speed=torch.tensor(speed_bins, device=path_pred.device, dtype=path_pred.dtype),
+        path_pred=path_pred,
+        scene_score_info=scene_score_info,
+        time_horizon=time_horizon,
+        safe_distance=safe_distance,
+        coll_radius=coll_radius,
+        ego_wl=ego_wl,
+        cuda_device=cuda_device
+    ) # Shape: [B, K, num_bins]
+    return ttc
     ttc = []
     for speed in speed_bins:
         # Compute TTC for this bin edge
