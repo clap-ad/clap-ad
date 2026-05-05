@@ -138,7 +138,7 @@ class PlanningHeadClap(nn.Module):
                 },
                 "traffic_rule_cfg":{
                     "speed_thresh":0.1,
-                    "ss_stop_distance": 0.0
+                    "ss_stop_distance": 2.0
                 },
                 "overtake_cfg":{
                     "ot_stop_distance": 20.0
