@@ -253,16 +253,18 @@ class ClosedLoopInference(OpenLoopInference):
             """Looks at pred scores to check whether a stop sign has been detected.
             It handles the temporal aspect of stop signs and overwrites predictions if necessary."""
             stop_scores = pred_speed_scores[2:3]
-
-            stop_target = get_desired_speed_from_scores(stop_scores, self.config_closed_loop.score_threshold)
-            
-            if stop_target == 2.5:
-                # speed value 2.5m/s is too noisy (braking path very short), therefore we need to overwrite it
-                stop_scores[:, 1] = 0.0
-                stop_target = 0.0
-                
-            
-            if stop_target > 0 and speed > 5.0:
+           
+            valid_bins = np.all(stop_scores > self.config_closed_loop.score_threshold, axis=0)
+            valid_candidates = np.where(valid_bins)[0]
+            max_valid_idx = int(np.max(valid_candidates))
+           
+            if max_valid_idx <= 1:
+                stop_scores[:, 1:2] = 0.0  # overwritten in place with pred_speed_scores
+                do_stop = True
+            else:
+                do_stop = False
+           
+            if not do_stop and speed > 5.0:
                 # If stop sign is not detected, reset stop completed status
                 self.stop_completed = False
                 self.stop_wait_count = 0
@@ -271,7 +273,7 @@ class ClosedLoopInference(OpenLoopInference):
                 pred_speed_scores[2:3] = np.ones_like(stop_scores)
                 return pred_speed_scores
             
-            if stop_target == 0 and speed < 0.01:
+            if do_stop and speed < 0.01:
                 # If stop sign is detected and we are stopped, wait 1 second (20 frames)
                 self.stop_wait_count += 1
                 if self.stop_wait_count >= self.config_closed_loop.stop_sign_wait_frames:
