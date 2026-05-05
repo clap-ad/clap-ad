@@ -4,6 +4,7 @@ Wrapper for debugging leaderboard.
 """
 
 import argparse
+import json
 import logging
 import os
 import shutil
@@ -273,6 +274,51 @@ class LeaderboardWrapper:
                 / f"outputs/local_evaluation/{self.routes_name}_{self.run_timestamp}"
             )
 
+    def _setup_resume_pool(self, resume_pool_path: str, output_dir: Path) -> None:
+        """Copy a route pool from a previous run into the new output directory.
+
+        Resets all non-"done" routes (taken, crashed, etc.) to "available".
+        Also copies merged.json from the old run as checkpoint_resumed.json.
+
+        Args:
+            resume_pool_path: Path to the .route_pool.json from a previous run.
+            output_dir: The new output directory to copy into.
+        """
+        source_pool = Path(resume_pool_path)
+        if source_pool.is_dir():
+            source_pool = source_pool / ".route_pool.json"
+        if not source_pool.exists():
+            raise FileNotFoundError(f"Resume pool not found: {source_pool}")
+
+        # Load and reset non-done routes
+        with open(source_pool, "r") as f:
+            pool_data = json.load(f)
+
+        for route in pool_data["routes"]:
+            if route["status"] != "done":
+                route["status"] = "available"
+                route["rank"] = -1
+
+        # Write modified pool to new output directory
+        dest_pool = output_dir / ".route_pool.json"
+        with open(dest_pool, "w") as f:
+            json.dump(pool_data, f, indent=2)
+
+        done_count = sum(1 for r in pool_data["routes"] if r["status"] == "done")
+        available_count = sum(1 for r in pool_data["routes"] if r["status"] == "available")
+        LOG.info(
+            f"Copied route pool to {dest_pool} "
+            f"(done={done_count}, available={available_count}, total={pool_data['total']})"
+        )
+
+        # Copy merged.json from the old run directory if it exists
+        old_output_dir = source_pool.parent
+        old_merged = old_output_dir / "merged.json"
+        if old_merged.exists():
+            dest_merged = output_dir / "checkpoint_resumed.json"
+            shutil.copy2(old_merged, dest_merged)
+            LOG.info(f"Copied {old_merged} -> {dest_merged}")
+
     def _setup_leaderboard_environment(
         self,
         root_output_dir: Path | None = None,
@@ -419,9 +465,14 @@ class LeaderboardWrapper:
         env.update(env_vars)
 
         # Clean output directory (skip if resuming)
-        if not self.args.resume and resolved_output_path.exists():
+        if not self.args.resume and not self.args.resume_pool and resolved_output_path.exists():
             LOG.info(f"Removing existing output directory: {resolved_output_path}")
             shutil.rmtree(resolved_output_path)
+
+        # Handle --resume-pool: copy pool and merged.json into new output directory
+        if self.args.resume_pool:
+            resolved_output_path.mkdir(parents=True, exist_ok=True)
+            self._setup_resume_pool(self.args.resume_pool, resolved_output_path)
 
         # Build command directly
         checkpoint_path = resolved_output_path / "checkpoint_endpoint.json"
@@ -690,6 +741,13 @@ Examples:
         action="store_true",
         default=False,
         help="Resume from checkpoint",
+    )
+    parser.add_argument(
+        "--resume-pool",
+        type=str,
+        default=None,
+        help="Path to a .route_pool.json from a previous run. Creates a new output directory, "
+             "copies the pool (resetting non-done routes to available), and resumes evaluation.",
     )
     parser.add_argument("--debug", type=int, default=0, help="Debug mode")
     parser.add_argument(
