@@ -159,10 +159,10 @@ class TFv6(nn.Module):
                     pred_target_speed_scalar,
                     pred_headings,
                 ) = self.planning_decoder(
-                    bev_embed=bev_features,
-                    planner_radar_features=planner_radar_features,
-                    planner_radar_predictions=planner_radar_predictions,
-                    data=data,
+                    bev_features,
+                    planner_radar_features,
+                    planner_radar_predictions,
+                    data,
                     log=self.log,
                 )
 
