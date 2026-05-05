@@ -837,6 +837,12 @@ class CARLAData(Dataset):
                         new_hz=new_hz
                     )
                     fut_wp_invalid = False
+                    
+                if obj_name == "OBSTACLE" \
+                and data["scenario_type"] == "BlockedIntersection":
+                    # encode blocking vehicle in BlockedIntersection scenario as vehicle
+                    obj_name = "VEHICLE"
+                
                 obj_dict = {
                     "type": obj_name.lower(),
                     "p_o_x": x,
