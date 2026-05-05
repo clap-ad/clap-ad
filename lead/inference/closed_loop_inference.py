@@ -252,10 +252,10 @@ class ClosedLoopInference(OpenLoopInference):
         def stop_sign_controller():
             """Looks at pred scores to check whether a stop sign has been detected.
             It handles the temporal aspect of stop signs and overwrites predictions if necessary."""
-            stop_scores = pred_speed_scores[2:3]
+            stop_scores = pred_speed_scores[2:3].copy()
 
             # speed bin 2.5m/s is too noisy, therefore we ignore it in the stop sign controller
-            # stop_scores[:, 1] = 0.0
+            stop_scores[:, 1] = 0.0
 
             stop_target = get_desired_speed_from_scores(stop_scores, self.config_closed_loop.score_threshold)
             
