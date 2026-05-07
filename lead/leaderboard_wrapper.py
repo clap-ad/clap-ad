@@ -211,12 +211,17 @@ class LeaderboardWrapper:
                 / "3rd_party/CARLA_0915/PythonAPI/carla",
             }
         else:  # STANDARD
+            evaluator_name = (
+                "leaderboard_evaluator_multigpu.py"
+                if getattr(self.args, "multigpu", False)
+                else "leaderboard_evaluator.py"
+            )
             return {
                 "leaderboard_root": self.workspace_root / "3rd_party/leaderboard",
                 "scenario_runner_root": self.workspace_root
                 / "3rd_party/scenario_runner",
                 "evaluator_script": self.workspace_root
-                / "3rd_party/leaderboard/leaderboard/leaderboard_evaluator.py",
+                / f"3rd_party/leaderboard/leaderboard/{evaluator_name}",
                 "evaluator_module": "leaderboard.leaderboard_evaluator",
             }
 
@@ -315,7 +320,7 @@ class LeaderboardWrapper:
         old_output_dir = source_pool.parent
         old_merged = old_output_dir / "merged.json"
         if old_merged.exists():
-            dest_merged = output_dir / "checkpoint_resumed.json"
+            dest_merged = output_dir / f"checkpoint_{old_output_dir.name}.json"
             shutil.copy2(old_merged, dest_merged)
             LOG.info(f"Copied {old_merged} -> {dest_merged}")
 

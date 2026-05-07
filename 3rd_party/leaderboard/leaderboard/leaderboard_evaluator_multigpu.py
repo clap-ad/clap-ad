@@ -346,10 +346,9 @@ class LeaderboardEvaluator(object):
         )
 
     def _merge_rank_results(self):
-        """Merge all per-rank checkpoint JSONs into merged.json using Bench2Drive's merge_route_json."""
-        # Import merge utility from Bench2Drive tools
+        """Merge all per-rank checkpoint JSONs into merged.json using merge_route_json."""
         try:
-            sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'tools'))
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tools'))
             from merge_route_json import merge_route_json
             import fcntl
         except ImportError:
