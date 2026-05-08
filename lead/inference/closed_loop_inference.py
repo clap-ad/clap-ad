@@ -202,7 +202,7 @@ class ClosedLoopInference(OpenLoopInference):
         speed: jt.Float[torch.Tensor, "1 1"],
         ego_vehicle_location: float = 0.0,
         ego_vehicle_rotation: float = 0.0,
-    ) -> tuple[float, float, float]:
+    ) -> tuple[float, float, float, float]:
         """Predicts vehicle control with a PID controller. Use route and speed scores.
 
         Args:
@@ -215,6 +215,7 @@ class ClosedLoopInference(OpenLoopInference):
             steer: Steering command in [-1, 1]
             throttle: Throttle command in [0, 1]
             brake: Brake command in [0, 1]
+            pred_target_speed: Target speed in m/s
         """
         def get_desired_speed_from_scores(pred_speed_scores, threshold=0.3, accel_awareness=False, curr_speed=None):
             # Find bins where all criteria have non-zero scores
@@ -313,7 +314,7 @@ class ClosedLoopInference(OpenLoopInference):
             brake, pred_target_speed, speed, self.config_expert
         )
 
-        return steer, throttle, float(brake)  
+        return steer, throttle, float(brake), pred_target_speed
 
     @beartype
     def ensemble(
@@ -355,7 +356,7 @@ class ClosedLoopInference(OpenLoopInference):
         if open_loop_prediction.pred_clapad is not None: # CLAP-AD control logic
             pred_route = open_loop_prediction.pred_clapad["sdc_traj"]
             speed_scores =  open_loop_prediction.pred_clapad["speed_logits"]
-            route_steer, target_speed_throttle, target_speed_brake = (
+            route_steer, target_speed_throttle, target_speed_brake, pred_target_speed = (
                 self.execute_route_and_best_speed(
                     pred_route,
                     speed_scores,
@@ -366,6 +367,7 @@ class ClosedLoopInference(OpenLoopInference):
             throttle = target_speed_throttle
             brake = target_speed_brake
             open_loop_prediction.pred_route = pred_route # for later closed-loop post-processings
+            open_loop_prediction.pred_target_speed_scalar = torch.tensor([pred_target_speed], dtype=torch.float32).unsqueeze(0)
 
         else: # Normal TFV6 control logic
             # Select which high-level modality we want to use for each control
