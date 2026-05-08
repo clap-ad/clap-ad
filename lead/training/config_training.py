@@ -686,8 +686,6 @@ class TrainingConfig(BaseConfig):
     # Use CLAP-AD head
     use_clapad_head = True
 
-    # Use CLAP-AD head
-    use_clapad_head = True
 
     # Used for TFv5 planning decoder
     gru_hidden_size = 64
@@ -722,6 +720,7 @@ class TrainingConfig(BaseConfig):
     max_distance_future_waypoint = 10.0
     target_first_distance = 1.0 #. 1 meters between waypoints
     target_first_distance = 1.0 #. 1 meters between waypoints
+    use_tf_context_encoder = True # To use path and context (radar) as tf
 
     @property
     def num_way_points_prediction(self):

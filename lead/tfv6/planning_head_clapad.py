@@ -1,7 +1,7 @@
 
 
 from lead.tfv6.speed_score_utils import compute_overtake_adherence, compute_stop_sign_adherence, compute_traffic_light_adherence, compute_ttc
-from lead.tfv6.planning_decoder import PositionEmbeddingSine
+from lead.tfv6.planning_decoder import PlanningContextEncoder, PositionEmbeddingSine
 from lead.tfv6.hydra_speed_head import HydraSpeedHead
 import torch
 import torch.nn as nn
@@ -51,28 +51,6 @@ class PlanningHeadClap(nn.Module):
             self.config.target_points_normalization_constants,
             dtype=self.config.torch_float_type,
         )
-        self.tp_encoder = nn.Linear(2, config.transfuser_token_dim)
-        
-        self.num_navi_info = 1 # Number of different embeddings representing future navigation info
-        command_dim = self.config.discrete_command_dim
-        self.navi_embed = nn.Embedding(command_dim, embed_dims)
-
-        if self.config.use_tp:
-            self.num_navi_info += 1
-            self.tp_encoder = nn.Linear(2, config.transfuser_token_dim)
-
-        if self.config.use_previous_tp:
-            self.num_navi_info += 1
-
-        if self.config.use_next_tp:
-            self.num_navi_info += 1
-        
-        self.dimension_adapter = nn.Conv2d(
-            512, self.config.transfuser_token_dim, kernel_size=1
-        )
-        self.cosine_pos_embeding = PositionEmbeddingSine(
-            config, self.config.transfuser_token_dim // 2, normalize=True
-        )
         self.planning_steps = self.config.num_route_points_prediction # since we predict 12 waypoints in future
         self.path_query = nn.Parameter(
             torch.zeros(
@@ -80,6 +58,9 @@ class PlanningHeadClap(nn.Module):
                 self.planning_steps,
                 self.config.transfuser_token_dim,
             )
+        )
+        self.dimension_adapter = nn.Conv2d(
+            512, self.config.transfuser_token_dim, kernel_size=1
         )
         self.transformer_decoder = torch.nn.TransformerDecoder(
             decoder_layer=nn.TransformerDecoderLayer(
@@ -147,6 +128,37 @@ class PlanningHeadClap(nn.Module):
         )
         
         self.traj_or_action = 'path_speed'  # 'traj' or 'action' or 'path_speed' or 'path_speed_wp'
+        self.use_tf_context_encoder = self.config.use_tf_context_encoder
+        if self.use_tf_context_encoder:
+            self.planning_context_encoder = PlanningContextEncoder(
+                config=self.config,
+                input_bev_channels=self.config.transfuser_token_dim,
+                device=config.device,
+            )
+        else:
+            self.target_points_normalization_constants = torch.tensor(
+                self.config.target_points_normalization_constants,
+                dtype=self.config.torch_float_type,
+            )
+            self.tp_encoder = nn.Linear(2, config.transfuser_token_dim)
+            
+            self.num_navi_info = 1 # Number of different embeddings representing future navigation info
+            command_dim = self.config.discrete_command_dim
+
+            if self.config.use_tp:
+                self.num_navi_info += 1
+                self.tp_encoder = nn.Linear(2, config.transfuser_token_dim)
+
+            if self.config.use_previous_tp:
+                self.num_navi_info += 1
+
+            if self.config.use_next_tp:
+                self.num_navi_info += 1
+            
+            self.cosine_pos_embeding = PositionEmbeddingSine(
+                config, self.config.transfuser_token_dim // 2, normalize=True
+            )
+            self.navi_embed = nn.Embedding(command_dim, embed_dims)
 
 
     def forward_train(self,
@@ -252,60 +264,72 @@ class PlanningHeadClap(nn.Module):
         dtype=self.config.torch_float_type
         data = kwargs.get("data", {})
         self.target_points_normalization_constants = self.target_points_normalization_constants.to(device, dtype=dtype)
+        
+        if not self.use_tf_context_encoder:
+            navi_embed = []
+            if self.config.use_discrete_command:
+                command = data["command"].to(
+                    device
+                )
+                # command is one-hot encoded [B, 6], need to get index
+                command = torch.argmax(command, dim=-1)
+                navi_embed.append(
+                    self.navi_embed.weight[command].unsqueeze(1)
+                )
+            # Encode target point
+            if self.config.use_tp:
+                target_point = data["target_point"].to(
+                    device, dtype=torch.float32, non_blocking=True
+                )
+                target_point = target_point / self.target_points_normalization_constants
+                tp_token = self.tp_encoder(target_point).reshape(
+                    -1, 1, self.config.transfuser_token_dim
+                )  # (bs, 1, transfuser_token_dim)
+                navi_embed.append(tp_token)
 
-        navi_embed = []
-        if self.config.use_discrete_command:
-            command = data["command"].to(
-                device
+            if self.config.use_previous_tp:
+                previous_tp = data["target_point_previous"].to(
+                    device, dtype=torch.float32, non_blocking=True
+                )
+                previous_tp = previous_tp / self.target_points_normalization_constants
+                previous_tp_token = self.tp_encoder(previous_tp).reshape(
+                    -1, 1, self.config.transfuser_token_dim
+                )  # (bs, 1, transfuser_token_dim)
+                navi_embed.append(previous_tp_token)
+
+            if self.config.use_next_tp:
+                next_tp = data["target_point_next"].to(
+                    device, dtype=torch.float32, non_blocking=True
+                )
+                next_tp = next_tp / self.target_points_normalization_constants
+                next_tp_token = self.tp_encoder(next_tp).reshape(
+                    -1, 1, self.config.transfuser_token_dim
+                )  # (bs, 1, transfuser_token_dim)
+                navi_embed.append(next_tp_token)
+
+
+            plan_query = self.dimension_adapter(bev_embed) # [B, transfuser_token_dim, H, W]
+            plan_query = plan_query + self.cosine_pos_embeding(plan_query)  # (B, transfuser_token_dim, H, W)
+            plan_query = torch.flatten(plan_query, start_dim=2)  # (B, transfuser_token_dim, H * W)
+            plan_query = plan_query.permute(0, 2, 1)  # (B, H * W, transfuser_token_dim)
+
+            navi_embed = torch.cat(navi_embed, dim=1)  # [B, (1+1+1+1), transfuser_token_dim]
+
+            plan_nav_query = torch.cat([plan_query, navi_embed], dim=1) # [B, (1+1+1+1) + H * W, transfuser_token_dim]
+
+            B = plan_nav_query.shape[0]  # Batch size
+            path_query = self.transformer_decoder(self.path_query.repeat(B, 1, 1), plan_nav_query) # [B, T, transfuser_token_dim]
+        else:
+            self.kv = context_tokens = self.planning_context_encoder(
+                bev_features=self.dimension_adapter(bev_embed),
+                radar_logits=planner_radar_features,
+                radar_predictions=planner_radar_predictions,
+                data=data,
+                log=kwargs.get("log", {})
             )
-            # command is one-hot encoded [B, 6], need to get index
-            command = torch.argmax(command, dim=-1)
-            navi_embed.append(
-                self.navi_embed.weight[command].unsqueeze(1)
-            )
-        # Encode target point
-        if self.config.use_tp:
-            target_point = data["target_point"].to(
-                device, dtype=torch.float32, non_blocking=True
-            )
-            target_point = target_point / self.target_points_normalization_constants
-            tp_token = self.tp_encoder(target_point).reshape(
-                -1, 1, self.config.transfuser_token_dim
-            )  # (bs, 1, transfuser_token_dim)
-            navi_embed.append(tp_token)
-
-        if self.config.use_previous_tp:
-            previous_tp = data["target_point_previous"].to(
-                device, dtype=torch.float32, non_blocking=True
-            )
-            previous_tp = previous_tp / self.target_points_normalization_constants
-            previous_tp_token = self.tp_encoder(previous_tp).reshape(
-                -1, 1, self.config.transfuser_token_dim
-            )  # (bs, 1, transfuser_token_dim)
-            navi_embed.append(previous_tp_token)
-
-        if self.config.use_next_tp:
-            next_tp = data["target_point_next"].to(
-                device, dtype=torch.float32, non_blocking=True
-            )
-            next_tp = next_tp / self.target_points_normalization_constants
-            next_tp_token = self.tp_encoder(next_tp).reshape(
-                -1, 1, self.config.transfuser_token_dim
-            )  # (bs, 1, transfuser_token_dim)
-            navi_embed.append(next_tp_token)
-
-
-        plan_query = self.dimension_adapter(bev_embed) # [B, transfuser_token_dim, H, W]
-        plan_query = plan_query + self.cosine_pos_embeding(plan_query)  # (B, transfuser_token_dim, H, W)
-        plan_query = torch.flatten(plan_query, start_dim=2)  # (B, transfuser_token_dim, H * W)
-        plan_query = plan_query.permute(0, 2, 1)  # (B, H * W, transfuser_token_dim)
-
-        navi_embed = torch.cat(navi_embed, dim=1)  # [B, (1+1+1+1), transfuser_token_dim]
-
-        plan_nav_query = torch.cat([plan_query, navi_embed], dim=1) # [B, (1+1+1+1) + H * W, transfuser_token_dim]
-
-        B = plan_nav_query.shape[0]  # Batch size
-        path_query = self.transformer_decoder(self.path_query.repeat(B, 1, 1), plan_nav_query) # [B, T, transfuser_token_dim]
+            bs = context_tokens.shape[0]
+            path_query = self.transformer_decoder(self.path_query.repeat(bs, 1, 1), context_tokens)
+            plan_query = context_tokens
 
         path_pred = self.path_fc(path_query) # [B, T, 2]
         path_pred = torch.cumsum(path_pred, dim=1)
@@ -353,15 +377,34 @@ class PlanningHeadClap(nn.Module):
         route_label = data["route"].to(
             device, dtype=self.config.torch_float_type, non_blocking=True
         )
+        route_mask = data.get("route_mask", None)
+        if route_mask is None:
+            route_mask = torch.ones_like(route_label[..., 0], dtype=torch.bool)
+        else:
+            route_mask = route_mask.to(device)
+            
         pred_clapad = predictions.pred_clapad
         pred_route = pred_clapad["sdc_traj"]
 
+        # Apply mask to route, route_mask: [B, T], pred_route: [B, T, 2], route_label: [B, T, 2]
+        route_mask_expanded = route_mask.unsqueeze(-1).expand_as(route_label)  # [B, T, 2]
+
+        # ADE: L1 loss over all valid points
+        ade_pred = pred_route[route_mask_expanded]
+        ade_label = route_label[route_mask_expanded]
         loss["loss_spatial_route"] = F.l1_loss(
-            pred_route, route_label.float()
+            ade_pred, ade_label.float()
         )  # ADE
+
+        # FDE: L1 loss at the last valid time step for each batch element
+        # Find the last valid index for each batch
+        last_indices = route_mask.long().sum(dim=1) - 1  # [B]
+        batch_indices = torch.arange(route_mask.shape[0], device=route_mask.device)
+        fde_pred = pred_route[batch_indices, last_indices, :]  # [B, 2]
+        fde_label = route_label[batch_indices, last_indices, :]  # [B, 2]
         loss["loss_spatial_route"] += F.l1_loss(
-            pred_route[:, -1, :].float(),
-            route_label[:, -1, :].float(),
+            fde_pred.float(),
+            fde_label.float(),
         )  # FDE
 
         curr_speed = data["speed"]
