@@ -10,6 +10,7 @@ import jaxtyping as jt
 import numpy as np
 import numpy.typing as npt
 from numpy.random import default_rng
+import torch
 from torch.utils.data import Dataset
 
 from lead.common.constants import (
@@ -20,6 +21,7 @@ from lead.common.constants import (
 from lead.data_loader import carla_dataset_utils, navsim_dataset_utils
 from lead.training.config_training import TrainingConfig
 
+from scipy.interpolate import make_interp_spline
 LOG = logging.getLogger(__name__)
 
 
@@ -134,7 +136,10 @@ class NavsimData(Dataset):
 
         feature, target = cache[target_path]
 
-        rgb = cv2.imdecode(feature["camera_feature"], cv2.IMREAD_COLOR)
+        camera_feature = feature["camera_feature"]
+        if isinstance(camera_feature, torch.Tensor):
+            camera_feature = camera_feature.numpy()
+        rgb = cv2.imdecode(camera_feature, cv2.IMREAD_COLOR)
         rgb = np.transpose(rgb, (2, 0, 1))  # HWC to CHW
 
         agent_states = target["agent_states"]
@@ -147,6 +152,26 @@ class NavsimData(Dataset):
             1,
         )  # Align NavSim BEV with CARLA BEV
         bev_semantic_map = cv2.imencode(".png", bev_semantic_map)[1]
+        
+        # for clap-ad
+        path = target.get("path", None)
+        if path is None:
+            path = np.zeros((10, 3)) # Dummy path of 10 points with (x,y,yaw)
+            path_mask = np.zeros(10, dtype=bool) # All points are invalid
+        else:
+            path = target["path"] # List of (x, y, yaw) tuples representing the path
+            if isinstance(path, torch.Tensor):
+                path = path
+            else:
+                path = path.poses
+            path, path_mask = preprocess_path(path, sampling_distance=self.config.target_first_distance, max_points=self.config.num_route_points_prediction)
+        
+        scene_info = target.get("scene_info", None)
+        if scene_info is None:
+            scene_score_info = [] # Empty list if scene info is not available
+        else:
+            scene_score_info = target["scene_info"] # Dict containing various scene scores
+            scene_score_info = preprocess_scene_info(scene_score_info) # Flip y-axis for all agents in scene info to align with CARLA
 
         data = {
             "sequence_id": self.feature[index].split("/")[-3],
@@ -161,6 +186,9 @@ class NavsimData(Dataset):
             "speed": np.linalg.norm(feature["status_feature"][4:6]),
             "acceleration": np.linalg.norm(feature["status_feature"][6:8]),
             "status_feature": feature["status_feature"],
+            "route": path,
+            "route_mask": path_mask,
+            "scene_score_info": scene_score_info,
         }
         if self.config.detect_boxes:
             self._convert_navsim_bb_to_carla(agent_states, agent_labels, data)
@@ -257,3 +285,103 @@ class NavsimData(Dataset):
             self.config.navsim_num_bb_classes,
         ).items():
             data["navsim_" + key] = value
+
+def preprocess_scene_info(scene_info: list):
+    """
+    To align with Carla, we will iterate over all coordinates of all
+    agents and flip their y-axis together with its yaw
+    Also to be compatible with Carla format, we add all info under
+    "agents" key in a dict.
+    """
+    scene_info_processed = {}
+    scene_info_processed["actors"] = []
+    for actor in scene_info:
+        actor_processed = {}
+        for key, value in actor.items():
+            if key in ["p_o_y", "p_o_y_fut", "vy", "yaw"]:
+                actor_processed[key] = -value
+            elif key=="fut_wp":
+                actor_processed[key] = value.copy()
+                actor_processed[key][:, 1] = -actor_processed[key][:, 1] # Flip y-axis of future waypoints
+            else:
+                actor_processed[key] = value
+        scene_info_processed["actors"].append(actor_processed)
+    return scene_info_processed
+
+import numpy as np
+from scipy.interpolate import splprep, splev
+
+def preprocess_path(path, sampling_distance=1.0, max_points=24):
+    """
+    Fit spline and sample points with approximately fixed Euclidean spacing.
+    Strategy for length mismatch:
+        - If path[0] > sampling_distance from origin, extrapolate points at the beginning until the first point is within sampling_distance from origin.
+        - If path[-1] < max_points * sampling_distance, pad with zeros at the end and mark them as invalid in the mask.
+    """
+    # Hnadle noisy stopping behvaiour
+    
+    # Handle short paths that cannot fit a spline of degree 3
+    if len(path) < 2:
+        sampled_path = np.zeros((max_points, 2))
+        mask = np.zeros(max_points, dtype=bool)
+        if len(path) == 1:
+            sampled_path[0] = path[0]
+            mask[0] = True
+        return sampled_path, mask
+
+    # Handle paths with duplicate points which can cause spline fitting to fail
+    # _, unique_indices = np.unique(path[:, 0], return_index=True)
+    _, unique_indices = np.unique(path, axis=0, return_index=True)
+    path = path[unique_indices]
+    if len(path) < 2:
+        sampled_path = np.zeros((max_points, 2))
+        mask = np.zeros(max_points, dtype=bool)
+        if len(path) == 1:
+            sampled_path[0] = path[0]
+            mask[0] = True
+        return sampled_path, mask
+
+    # if path[0] > sampling_distance from origin, extrapolate points at the beginning until the first point is within sampling_distance from origin.
+    # Ensure path stays ahead (x >= 0), do not extrapolate to negative x (backwards)
+    if np.linalg.norm(path[0]) > sampling_distance:
+        direction = path[0] / np.linalg.norm(path[0])
+        num_extrapolated_points = int(np.ceil(np.linalg.norm(path[0]) / sampling_distance))
+        extrapolated_points = []
+        for i in range(num_extrapolated_points, 0, -1):
+            new_point = path[0] - direction * sampling_distance * i
+            if new_point[0] < 0:
+                continue  # Skip points that would go behind (negative x)
+            extrapolated_points.append(new_point)
+        if extrapolated_points:
+            path = np.vstack((np.array(extrapolated_points), path))
+    
+    # Fit spline
+    k = min(3, len(path) - 1)
+    tck, _ = splprep([path[:, 0], path[:, 1]], s=1, k=k)
+    # Dense spline sampling
+    u_dense = np.linspace(0, 1, 2000)
+    x_dense, y_dense = splev(u_dense, tck)
+    dense_path = np.stack([x_dense, y_dense], axis=1)
+    # sampling
+    sampled = []
+    reference_point = np.array([0.0, 0.0])
+    for p in dense_path:
+        dist = np.linalg.norm(p - reference_point)
+        if dist >= sampling_distance:
+            sampled.append(p)
+            reference_point = p
+        if len(sampled) >= max_points:
+            break
+
+    sampled = np.array(sampled, dtype=np.float32)
+    sampled_path = np.zeros((max_points, 2), dtype=np.float32)
+    mask = np.zeros(max_points, dtype=bool)
+    num_valid = min(len(sampled), max_points)
+    if num_valid > 0:
+        sampled_path[:num_valid] = sampled[:num_valid]
+        mask[:num_valid] = True
+
+    # ----------- Flip Y axis ---------------------------------------
+    sampled_path[:, 1] = -sampled_path[:, 1]
+
+    return sampled_path, mask

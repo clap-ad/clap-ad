@@ -9,6 +9,7 @@ from torchvision import transforms
 
 from shapely import affinity
 from shapely.geometry import Polygon, LineString
+from scipy.interpolate import CubicSpline
 
 from nuplan.common.maps.abstract_map import AbstractMap, SemanticMapLayer, MapObject
 from nuplan.common.actor_state.oriented_box import OrientedBox
@@ -16,10 +17,15 @@ from nuplan.common.actor_state.state_representation import StateSE2
 from nuplan.common.actor_state.tracked_objects_types import TrackedObjectType
 
 from navsim.agents.transfuser.transfuser_config import TransfuserConfig
-from navsim.common.dataclasses import AgentInput, Scene, Annotations
+from navsim.common.dataclasses import AgentInput, Scene, Annotations, Trajectory
 from navsim.common.enums import BoundingBoxIndex, LidarIndex
 from navsim.planning.scenario_builder.navsim_scenario_utils import tracked_object_types
 from navsim.planning.training.abstract_feature_target_builder import AbstractFeatureBuilder, AbstractTargetBuilder
+from navsim.planning.simulation.planner.pdm_planner.utils.pdm_geometry_utils import (
+    convert_absolute_to_relative_se2_array,
+)
+from nuplan.planning.simulation.trajectory.trajectory_sampling import TrajectorySampling
+from py123d.geometry.transform.transform_se2 import convert_relative_to_absolute_se2_array
 
 
 class TransfuserFeatureBuilder(AbstractFeatureBuilder):
@@ -143,12 +149,16 @@ class TransfuserTargetBuilder(AbstractTargetBuilder):
 
         agent_states, agent_labels = self._compute_agent_targets(annotations)
         bev_semantic_map = self._compute_bev_semantic_map(annotations, scene.map_api, ego_pose)
+        path = torch.tensor(self.get_future_path(scene).poses)
+        scene_info = get_scene_score_info_from_scene(scene)
 
         return {
             "trajectory": trajectory,
             "agent_states": agent_states,
             "agent_labels": agent_labels,
             "bev_semantic_map": bev_semantic_map,
+            "scene_info": scene_info,
+            "path": path
         }
 
     def _compute_agent_targets(self, annotations: Annotations) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -340,6 +350,243 @@ class TransfuserTargetBuilder(AbstractTargetBuilder):
 
         return coords_idcs.astype(np.int32)
 
+    def get_future_path(self, scene):
+        """
+        Extracts the future path of the human operator until the end of the scenario.
+        Captures all future ego poses after the current frame.
+        """
+        start_frame_idx = scene.scene_metadata.num_history_frames - 1
+        start_ego_pose = scene.frames[start_frame_idx].ego_status.ego_pose
+
+        # Collect all future ego poses
+        future_poses = []
+        for frame_idx in range(start_frame_idx + 1, len(scene.frames)):
+            pose = scene.frames[frame_idx].ego_status.ego_pose
+            future_poses.append(pose)
+
+
+        future_poses = np.array(future_poses, dtype=np.float64)
+        local_poses = convert_absolute_to_relative_se2_array(
+            StateSE2(*start_ego_pose), future_poses
+        )
+
+        return Trajectory(
+            local_poses,
+            TrajectorySampling(
+                num_poses=len(local_poses),
+                interval_length=1.0,  # interval_length is arbitrary here
+            ),
+        )
+        
+def get_scene_score_info_from_scene(scene) -> list[dict]:
+    """
+    Extracts agent bounding boxes and their future waypoints for scene scoring.
+    Returns a list of dicts, each containing:
+        - type: str
+        - p_o_x, p_o_y: current position
+        - p_o_x_fut, p_o_y_fut: future position
+        - vx, vy: velocity
+        - yaw: heading
+        - bbox: [width, height]
+        - fut_wp: upsampled future waypoints (N, 2)
+        - fut_wp_invalid: bool
+        - corners: (4, 2) array of bbox corners
+    """
+    num_poses = 8
+    
+    frame_idx = scene.scene_metadata.num_history_frames - 1
+    annotations = scene.frames[frame_idx].annotations
+    boxes = annotations.boxes
+    names = annotations.names
+    track_tokens = annotations.track_tokens
+    velocities = annotations.velocity_3d
+    headings = [box[BoundingBoxIndex.HEADING] for box in boxes]
+    lengths = [box[BoundingBoxIndex.LENGTH] for box in boxes]
+    widths = [box[BoundingBoxIndex.WIDTH] for box in boxes]
+    ttc_time_horizon = 4 # seconds
+
+    # Prepare future frames
+    future_frames = scene.frames[frame_idx + 1 : frame_idx + 1 + num_poses]
+    start_ego_pos = scene.frames[frame_idx].ego_status.ego_pose[:3] #x,y,angle
+
+    scene_score_info = []
+    for idx, (box, name, track_token, velocity, yaw, l, w) in enumerate(zip(boxes, names, track_tokens, velocities, headings, lengths, widths)):
+        if name != "vehicle":
+            continue
+
+        # Current position
+        x, y = box[BoundingBoxIndex.X], box[BoundingBoxIndex.Y]
+        vx, vy = velocity[0], velocity[1]
+
+        # Gather future waypoints for this agent
+        fut_wp = []
+        for future_frame in future_frames:
+            future_annotations = future_frame.annotations
+            ego_fut_pos = future_frame.ego_status.ego_pose[:3] #x,y,angle
+            for f_box, f_name, f_token in zip(future_annotations.boxes, future_annotations.names, future_annotations.track_tokens):
+                if f_name == "vehicle" and f_token == track_token:
+                    agent_fut_pos = f_box[:3]
+                    
+                    # --- Step 1: agent pose in FUTURE EGO frame ---
+                    agent_fut_relative = f_box[:3]
+
+                    # --- Step 2: convert to GLOBAL frame ---
+                    agent_global = convert_relative_to_absolute_se2_array(
+                        ego_fut_pos,
+                        agent_fut_relative
+                    )
+
+                    # --- Step 3: convert GLOBAL → CURRENT EGO frame ---
+                    agent_relative_now = convert_absolute_to_relative_se2_array(
+                        StateSE2(*start_ego_pos),
+                        agent_global
+                    )[0]
+
+                    fut_wp.append(agent_relative_now[:2]) # x,y,angle
+                    break  # Only one match per frame
+
+        fut_wp = np.array(fut_wp)
+        # Future position (constant velocity fallback if no waypoints)
+        if len(fut_wp) > 0:
+            p_fut = fut_wp[-1]
+        else:
+            v_ego_x = np.cos(yaw) * vx - np.sin(yaw) * vy
+            v_ego_y = np.sin(yaw) * vx + np.cos(yaw) * vy
+            p_fut = np.array([x + v_ego_x * ttc_time_horizon, y + v_ego_y * ttc_time_horizon])
+
+        # Upsample waypoints if possible
+        new_hz = 10
+        old_hz = 2
+        if len(fut_wp) < int(old_hz * ttc_time_horizon):
+            fut_wp_ups = np.zeros((int(new_hz * ttc_time_horizon), 2))
+            fut_wp_invalid = True
+        else:
+            t_old = np.linspace(0, ttc_time_horizon, len(fut_wp))
+            t_new = np.linspace(0, ttc_time_horizon, int(new_hz * ttc_time_horizon))
+            cs_x = CubicSpline(t_old, fut_wp[:, 0])
+            cs_y = CubicSpline(t_old, fut_wp[:, 1])
+            x_new = cs_x(t_new)
+            y_new = cs_y(t_new)
+            fut_wp_ups = np.stack([x_new, y_new], axis=1)
+            fut_wp_invalid = False
+
+        # Compute corners
+        c, s = np.cos(yaw), np.sin(yaw)
+        rot = np.array([[c, -s], [s, c]])
+        half_w, half_l = w / 2, l / 2
+        corners = np.array([
+            [-half_l, -half_w],
+            [ half_l, -half_w],
+            [ half_l,  half_w],
+            [-half_l,  half_w]
+        ])
+        corners = (corners @ rot.T) + np.array([x, y])
+
+        obj_dict = {
+            "type": name.lower(),
+            "p_o_x": x,
+            "p_o_y": y,
+            "p_o_x_fut": p_fut[0],
+            "p_o_y_fut": p_fut[1],
+            "vx": vx,
+            "vy": vy,
+            "yaw": yaw,
+            "bbox": [w * 2, l * 2],
+            "fut_wp": fut_wp_ups,
+            "fut_wp_invalid": fut_wp_invalid,
+            "corners": corners
+        }
+        scene_score_info.append(obj_dict)
+    return scene_score_info
+
+def get_traffic_rules(scene, frame_idx):
+    """
+    Extracts traffic rules from map API for a given frame in the scene.
+    Returns a list of dicts, each containing:
+    - type: str
+    - long_dist: distance along the lane to the traffic rule
+    - lat_dist: lateral distance from the lane center to the traffic rule
+    - dist_to_ego: Euclidean distance from the ego to the traffic rule
+    """
+    map_api = scene.map_api
+    ego_pose = StateSE2(*scene.frames[frame_idx].ego_status.ego_pose)
+    layers_of_interest = [SemanticMapLayer.STOP_SIGN, SemanticMapLayer.TRAFFIC_LIGHT]
+    raise NotImplementedError("Traffic rule extraction not fully implemented yet.")
+    traffic_rules = []
+    for layer in layers_of_interest:
+        map_objects = map_api.get_proximal_map_objects(point=ego_pose.point, radius=100, layers=[layer])[layer]
+        for obj in map_objects:
+            if isinstance(obj.polygon, Polygon):
+                geometry = TransfuserTargetBuilder._geometry_local_coords(obj.polygon, ego_pose)
+            elif isinstance(obj.baseline_path.linestring, LineString):
+                geometry = TransfuserTargetBuilder._geometry_local_coords(obj.baseline_path.linestring, ego_pose)
+            else:
+                continue
+    
+    return traffic_rules
+
+def vis(scene):
+    folder_path = "/workspace/temp_vis/navsim"
+    # check exist or create it
+    import os
+    if not os.path.exists(folder_path):
+        os.makedirs(folder_path)
+    import datetime
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    vis_folder = os.path.join(folder_path, timestamp)
+    os.makedirs(vis_folder, exist_ok=True)
+    print(f"Visualization directory: {os.path.abspath(vis_folder)}")
+    os.chdir(vis_folder)
+    import matplotlib.pyplot as plt
+    frame_idx = scene.scene_metadata.num_history_frames - 1 # current frame
+    
+    
+    from navsim.visualization.plots import plot_bev_with_agent
+    from navsim.agents.constant_velocity_agent import ConstantVelocityAgent
+    agent = ConstantVelocityAgent()
+    fig, ax = plot_bev_with_agent(scene, agent)
+    plt.show()
+    plt.savefig("bev_vis_agent.png")
+    from navsim.visualization.plots import plot_cameras_frame
+    fig, ax = plot_cameras_frame(scene, frame_idx)
+    plt.show()
+    plt.savefig("cameras_vis.png")
+    
+    # Scene_score_info
+    scene_score_info = get_scene_score_info_from_scene(scene)
+    figsize=(10, 10)
+    fig, ax = plt.subplots(figsize=figsize)
+    colors = plt.cm.get_cmap('tab10', len(scene_score_info))
+
+    for idx, obj in enumerate(scene_score_info):
+        x, y = obj["p_o_x"], obj["p_o_y"]
+        corners = obj["corners"]
+        fut_wp = obj["fut_wp"]
+        fut_wp_invalid = obj["fut_wp_invalid"]
+        label = obj["type"]
+
+        # Plot agent center
+        ax.plot(x, y, 'o', color=colors(idx), label=f'{label} center' if idx == 0 else None)
+        ax.plot(obj["p_o_x_fut"], obj["p_o_y_fut"], 'o', color=colors(idx), label=f'{label} center' if idx == 0 else None)
+
+        # Plot bounding box corners
+        corners_closed = np.vstack([corners, corners[0]])  # close the box
+        ax.plot(corners_closed[:, 0], corners_closed[:, 1], '-', color=colors(idx), lw=2, label=f'{label} bbox' if idx == 0 else None)
+
+        # Plot upsampled future waypoints
+        if not fut_wp_invalid and fut_wp.shape[0] > 0:
+            ax.plot(fut_wp[:, 0], fut_wp[:, 1], 'x', color=colors(idx), label=f'{label} fut_wp' if idx == 0 else None)
+        else:
+            ax.plot([], [], ' ', label=f'{label} fut_wp INVALID')
+
+    ax.set_aspect('equal')
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_title('Scene Score Info Visualization')
+    ax.legend()
+    plt.show()
+    plt.savefig("Scene score info.png")
+    
 
 class BoundingBox2DIndex(IntEnum):
     """Intenum for bounding boxes in TransFuser."""

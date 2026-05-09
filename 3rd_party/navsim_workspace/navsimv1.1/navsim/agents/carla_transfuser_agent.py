@@ -98,13 +98,22 @@ class CarlaTransfuserAgent(AbstractAgent):
             "speed": torch.linalg.norm(features["status_feature"][:, 4:6]).reshape(-1, 1),
             "acceleration": torch.linalg.norm(features["status_feature"][:, 6:8]).reshape(-1, 1),
         })
-        
-        future_waypoints = output.pred_future_waypoints.clone()
-        
-        # Model trained in mixed dataset, need to flip y axis
-        future_waypoints[:, :, 1] = -future_waypoints[:, :, 1]
-        future_headings = -output.pred_future_headings.clone()
-        
+        pred_clapad = output.pred_clapad
+        if pred_clapad is None:
+            future_waypoints = output.pred_future_waypoints.clone()
+            # Model trained in mixed dataset, need to flip y axis
+            future_waypoints[:, :, 1] = -future_waypoints[:, :, 1]
+            future_headings = -output.pred_future_headings.clone()
+        else:
+            pred_traj = traj_from_clapad(pred_clapad, current_speed=features["status_feature"][:, 4:6].norm(dim=-1).item(), speed_bins=self._carla_model_config.speed_bins)
+            future_waypoints = pred_traj.unsqueeze(0)  # (1, 8, 2)
+            # add (0,0) for current position to compute headings
+            future_waypoints_pad = torch.cat([torch.zeros(1, 1, 2).to(future_waypoints.device), future_waypoints], dim=1)  # (1, 9, 2)
+            future_headings = torch.atan2(
+                future_waypoints_pad[:, 1:, 1] - future_waypoints_pad[:, :-1, 1],
+                future_waypoints_pad[:, 1:, 0] - future_waypoints_pad[:, :-1, 0]
+            )
+            
         return {
             "trajectory": torch.concatenate([future_waypoints, future_headings.unsqueeze(-1)], dim=-1).cpu()
         }
@@ -124,3 +133,155 @@ class CarlaTransfuserAgent(AbstractAgent):
     def get_training_callbacks(self) -> List[pl.Callback]:
         """Inherited, see superclass."""
         raise NotImplementedError("CARLA TransFuser supports only inference.")
+    
+    def get_pred_clap(self, features: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Get score preds for speed bins"""
+        rgb : torch.Tensor = features["camera_feature"]
+        rgb = rgb.numpy()
+        rgb = cv2.imdecode(np.frombuffer(rgb, np.uint8), cv2.IMREAD_COLOR)
+        rgb = np.transpose(rgb, (2, 0, 1))  # HWC to CHW
+        rgb = torch.tensor(rgb).unsqueeze(0).float()  # CHW to NCHW
+        
+        output: CarlaOpenLoopPrediction = self._carla_open_loop_inference.forward({
+            "rgb": rgb,
+            "command": features["status_feature"][:, :4].reshape(-1, 4),
+            "speed": torch.linalg.norm(features["status_feature"][:, 4:6]).reshape(-1, 1),
+            "acceleration": torch.linalg.norm(features["status_feature"][:, 6:8]).reshape(-1, 1),
+        })
+        pred_clapad = output.pred_clapad
+        if pred_clapad is None:
+            return None, None
+        else:
+            path = pred_clapad["sdc_traj"][0].clone()          # (T, 2), 1m spacing
+            path[:, 1] = -path[:, 1]
+            speed_logits = pred_clapad["speed_logits"][0,0]  # (M, S)
+            coll_score = speed_logits[0]  # (S,)
+            # Median speed bin with collision score > 0.3
+            coll_score_sigmoid = torch.sigmoid(coll_score.float())
+            return path, coll_score_sigmoid.cpu() # (S,)
+    
+    def compute_clap(self, agent_input):
+        """
+        Computes the ego vehicle trajectory.
+        :param current_input: Dataclass with agent inputs.
+        :return: Trajectory dataclass with predicted trajectory.
+        """
+        self.eval()
+        features: Dict[str, torch.Tensor] = {}
+        # build features
+        for builder in self.get_feature_builders():
+            features.update(builder.compute_features(agent_input))
+
+        # add batch dimension
+        features = {k: v.unsqueeze(0) for k, v in features.items()}
+
+        # forward pass
+        with torch.no_grad():
+            path, speed_score = self.get_pred_clap(features)
+
+        # extract trajectory
+        return path, speed_score
+            
+
+
+def traj_from_clapad(pred_clapad: dict, current_speed: float, speed_bins):
+    """
+    Convert CLAPAD predictions to trajectory format.
+    pred_clapad is a dict containing:
+        - sdc_traj: (B, T, 2) tensor of predicted path in the SDC frame
+        - speed_logits (B, NUM_PATHS, M, S) where
+            - B is batch size
+            - NUM_PATHS is the number of augmented paths (path[0] corresponds to sdc_traj)
+            - M is safety criteria, S is the number of speed bins.
+    The function implements the logic to look at the speed logits and pick appropriate for speed profile
+    to travel along the predicted path. The output is a tensor representing temporal trajectory
+    """
+
+    # speed_bins = torch.tensor([0, 2.5, 5, 7, 8.5, 10, 12], dtype=torch.float32)
+
+    path = pred_clapad["sdc_traj"][0].clone()          # (T, 2), 1m spacing
+    logits = pred_clapad["speed_logits"][0,0] # (M, S)
+    
+    # flip y axis of path:
+    path[:, 1] = -path[:, 1]
+    # collision criterion assumed at index 0
+    scores = torch.sigmoid(logits[0])
+
+    # Option to discard some upper classes (e.g., highest speed bins)
+    # Set `num_upper_classes_to_discard` to the number of upper classes to ignore
+    num_upper_classes_to_discard = 0  # Change this value as needed
+    if num_upper_classes_to_discard > 0:
+        scores = scores[:-num_upper_classes_to_discard]
+        speed_bins_used = speed_bins[:-num_upper_classes_to_discard]
+    else:
+        speed_bins_used = speed_bins
+
+    valid_idxs = (scores > 0.3).nonzero(as_tuple=True)[0]
+    if valid_idxs.numel() > 0:
+        n = valid_idxs.numel()
+        # If even, round up median to upper index
+        median_idx = valid_idxs[(n - 1) // 2] if n % 2 == 1 else valid_idxs[n // 2]
+        # median_idx = valid_idxs[n // 2]
+        speed = speed_bins_used[median_idx].clamp(min=0.0)
+    else:
+        speed = speed_bins_used[0]  # default to lowest speed if no valid path
+
+    # cumulative arc length (only consider x axis for forward movement)
+    origin = torch.tensor([[0.0, 0.0]], device=path.device)
+    if torch.norm(path[0]) > 1e-3:
+        path = torch.cat([origin, path], dim=0)
+    ds = torch.norm(path[1:] - path[:-1], dim=-1)
+    s_path = torch.cat([torch.zeros(1, device=path.device), ds.cumsum(0)])
+
+    # 4 sec @ 2Hz -> 8 future points
+    # t = torch.arange(1, 9, device=path.device) * 0.5
+    # speed_profile = current_speed + (speed - current_speed) * (t / t[-1])  # linear speed profile
+    dt = 0.5
+    max_accel = 2.0   # m/s^2
+    max_decel = 4.0   # m/s^2
+    target_speed = speed.item()
+    speed_profile = [current_speed]
+    for _ in range(8):
+
+        current_v = speed_profile[-1]
+
+        delta = target_speed - current_v
+
+        # accelerate
+        if delta > 0:
+            next_v = current_v + min(delta, max_accel * dt)
+
+        # brake
+        else:
+            next_v = current_v - min(-delta, max_decel * dt)
+
+        next_v = max(next_v, 0.0)
+        speed_profile.append(next_v)
+    speed_profile = torch.tensor(
+        speed_profile,
+        device=path.device,
+        dtype=torch.float32
+    )
+
+    # trapezoidal integration
+    s_query = torch.zeros_like(speed_profile)
+
+    s_query[1:] = torch.cumsum(
+        0.5 * (speed_profile[:-1] + speed_profile[1:]) * dt,
+        dim=0
+    )
+
+    # remove t=0 state -> keep future trajectory only
+    s_query = s_query[1:]
+
+    # interpolate along path
+    idx = torch.searchsorted(s_path, s_query).clamp(1, len(s_path)-1)
+
+    s0, s1 = s_path[idx-1], s_path[idx]
+    p0, p1 = path[idx-1], path[idx]
+
+    alpha = ((s_query - s0) / (s1 - s0 + 1e-6)).unsqueeze(-1)
+
+    traj = p0 + alpha * (p1 - p0)
+
+    return traj   # (8, 2)
