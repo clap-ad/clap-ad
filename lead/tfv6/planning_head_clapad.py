@@ -107,7 +107,7 @@ class PlanningHeadClap(nn.Module):
         self.speed_is_scores = True
 
         # Loss funcations
-        speed_bins=[0, 2.5, 5, 7, 8.5, 10, 12] # speed bins for the speed head
+        speed_bins = self.config.speed_bins
         ttc_time_horizon = self.config.ttc_time_horizon # in seconds
         self.loss_speed = SpeedScoringLoss(
             speed_bins=speed_bins,

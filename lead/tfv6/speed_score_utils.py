@@ -1213,7 +1213,7 @@ def compute_ttc(path_pred, scene_score_info, speed_bins,
     """
     # Compute TTC for each speed bin based on scene information
     ttc = _compute_ttc_for_bin_efficient_multipath(
-        speed=torch.tensor(speed_bins, device=path_pred.device, dtype=path_pred.dtype),
+        speed=speed_bins.to(path_pred.device),
         path_pred=path_pred,
         scene_score_info=scene_score_info,
         time_horizon=time_horizon,

@@ -72,7 +72,7 @@ class ClosedLoopInference(OpenLoopInference):
         )
 
         self.step = 4  # Constant so produced images start with 5, not really important
-        self.speed_bins=[0, 2.5, 5, 7, 8.5, 10, 12] # speed bins for the speed head
+        self.speed_bins=self.config_training.speed_bins # speed bins for the speed head
         self.stop_completed = False
         self.stop_wait_count = 0
 

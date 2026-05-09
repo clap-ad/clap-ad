@@ -711,16 +711,16 @@ class TrainingConfig(BaseConfig):
     # If true smooth the route points with a spline.
     smooth_route = True
     # Number of route points we use for smoothing.
-    num_route_points_smoothing = 25
+    num_route_points_smoothing = 50
     # Number of route checkpoints to predict. Needs to be smaller than num_route_points_smoothing!
     # num_route_points_prediction = 10
-    num_route_points_prediction = 24
+    num_route_points_prediction = 48
     ttc_time_horizon = 2.0 # seconds
     # Assume maximum distance between two future waypoints in meters.
     max_distance_future_waypoint = 10.0
-    target_first_distance = 1.0 #. 1 meters between waypoints
-    target_first_distance = 1.0 #. 1 meters between waypoints
+    target_first_distance = 0.5 #. 1 meters between waypoints
     use_tf_context_encoder = True # To use path and context (radar) as tf
+    speed_bins=torch.tensor([0, 1, 2, 3, 4, 5, 6]) # speed bins for the speed head
 
     @property
     def num_way_points_prediction(self):
