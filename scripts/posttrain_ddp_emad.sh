@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Set which GPUs to use (comma-separated, e.g., "0,1,2,3")
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
 
 export OMP_NUM_THREADS=$(nproc)
 export OPENBLAS_NUM_THREADS=1 # Shuts off numpy multithreading, to avoid threads spawning other threads.
@@ -27,7 +27,8 @@ echo "Using GPUs: $CUDA_VISIBLE_DEVICES for training"
 export LEAD_TRAINING_CONFIG="carla_data=/data/datasets/AD_datasets/lead_carla/data/carla_leaderboard2/data \
 load_file=/workspace/lead/outputs/local_training/TFv6_org_first_stage_fixed_copy/model_0030.pth \
 use_planning_decoder=true \
-num_route_points_prediction=12 \
+num_route_points_smoothing=25 \
+num_route_points_prediction=24 \
 target_first_distance=1.0"
 
 uv run python -m torch.distributed.run \
