@@ -511,7 +511,11 @@ class BaseConfig:
 
         # --- Update config object with loaded config and environment variables
         for key, value in loaded_config.items():
-            if hasattr(self, key) and not callable(getattr(self, key)):
+            # Check if key exists as a class/instance attribute without triggering @property
+            found = any(key in cls.__dict__ for cls in type(self).__mro__)
+            if not found:
+                found = key in self.__dict__
+            if found:
                 try:
                     setattr(self, key, value)
                 except Exception as _:
