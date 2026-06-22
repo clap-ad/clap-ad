@@ -72,13 +72,8 @@ class PlanningHeadClap(nn.Module):
             num_layers=self.config.transfuser_num_bev_cross_attention_layers,
             norm=nn.LayerNorm(self.config.transfuser_token_dim),
         )
-        self.path_fc = nn.Sequential(
-            nn.Linear(embed_dims, embed_dims * 2),
-            nn.ReLU(),
-            nn.Linear(embed_dims * 2, embed_dims),
-            nn.ReLU(),
-            nn.Linear(embed_dims, 2),
-        )
+        # Single linear head, matching PlanningDecoder.route_decoder.
+        self.path_fc = nn.Linear(embed_dims, 2)
         num_modes = 4 # TTC - TF-light - Stop sign - Overtake
         assert num_modes > 1
         # use same speed head for time-to-collision (TTC) and traffic light (TL) branches
@@ -160,6 +155,10 @@ class PlanningHeadClap(nn.Module):
             )
             self.navi_embed = nn.Embedding(command_dim, embed_dims)
 
+        # Break query symmetry: with zero-initialized queries and no positional
+        # encoding on the path query, all route slots are identical, collapsing
+        # the predicted route to a straight line. Matches PlanningDecoder.
+        nn.init.uniform_(self.path_query)
 
     def forward_train(self,
                       bev_embed, 
