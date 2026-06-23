@@ -15,13 +15,17 @@ from __future__ import print_function
 import traceback
 import argparse
 from argparse import RawTextHelpFormatter
+from datetime import datetime, timedelta
 from distutils.version import LooseVersion
 import importlib
 import os
+import os.path as osp
 import pkg_resources
 import sys
 import carla
 import signal
+import torch
+import torch.distributed as dist
 
 from srunner.scenariomanager.carla_data_provider import *
 from srunner.scenariomanager.timer import GameTime
@@ -38,8 +42,7 @@ import atexit
 import subprocess
 import time
 import random
-from datetime import datetime, timedelta
-import os.path as osp
+
 
 sensors_to_icons = {
     'sensor.camera.rgb':        'carla_camera',
@@ -69,18 +72,16 @@ def get_weather_id(weather_conditions):
     root = tree.getroot()
     def conditions_match(weather, conditions):
         for (key, value) in weather:
-            if key == 'route_percentage' : continue
-            if str(getattr(conditions, key))!= value:
+            if key == 'route_percentage':
+                continue
+            if str(getattr(conditions, key)) != value:
                 return False
         return True
     for case in root.findall('case'):
         weather = case[0].items()
         if conditions_match(weather, weather_conditions):
-            return case.items()[0][1]
+            return list(case.items())[0][1]
     return None
-
-import torch
-import torch.distributed as dist
 
 def setup(rank, world_size):
     # Use LOCAL_RANK to select the GPU *within this node*
@@ -93,10 +94,11 @@ def setup(rank, world_size):
         world_size=world_size,
         timeout=timedelta(seconds=1200),
     )
-    # torch.cuda.set_device(rank)
+
 
 def cleanup():
     dist.destroy_process_group()
+
 
 class LeaderboardEvaluator(object):
     """
@@ -115,7 +117,7 @@ class LeaderboardEvaluator(object):
         """
         self.rank = int(os.environ.get("RANK", 0))
         self.world_size = int(os.environ.get("WORLD_SIZE", 1))
-        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
         if self.world_size > 1:
             setup(self.rank, self.world_size)
             cuda_devices = os.environ.get('CUDA_VISIBLE_DEVICES')
@@ -124,12 +126,12 @@ class LeaderboardEvaluator(object):
             if carla_devices is None:
                 carla_devices = cuda_devices
             carla_device_list = [int(gpu.strip()) for gpu in carla_devices.split(',')]
-            args.port = args.port_list[carla_device_list[local_rank]]
+            args.port = args.port_list[carla_device_list[self.local_rank]]
             print(f"Running in multi-GPU mode: rank {self.rank} of {self.world_size}, port {args.port}", flush=True)
         else:
             carla_devices = os.environ.get('CARLA_GPU')
             carla_device_list = [int(gpu.strip()) for gpu in carla_devices.split(',')]
-            args.port = args.port_list[carla_device_list[local_rank]]
+            args.port = args.port_list[carla_device_list[self.local_rank]]
             print(f"Running in single-GPU mode: rank {self.rank} of {self.world_size}, port {args.port}", flush=True)
         # Check SAVE_PATH and append a random name if it ends with '/debugger'
         save_path = os.environ.get("SAVE_PATH", "./debugger")
@@ -175,10 +177,10 @@ class LeaderboardEvaluator(object):
         # Setup the simulation
         self.client, self.client_timeout, self.traffic_manager = self._setup_simulation(args)
 
-        dist = pkg_resources.get_distribution("carla")
-        if dist.version != 'leaderboard':
-            if LooseVersion(dist.version) < LooseVersion('0.9.10'):
-                raise ImportError("CARLA version 0.9.10.1 or newer required. CARLA version found: {}".format(dist))
+        dist_pkg = pkg_resources.get_distribution("carla")
+        if dist_pkg.version != 'leaderboard':
+            if LooseVersion(dist_pkg.version) < LooseVersion('0.9.10'):
+                raise ImportError("CARLA version 0.9.10.1 or newer required. CARLA version found: {}".format(dist_pkg))
 
         # Load agent
         module_name = os.path.basename(args.agent).split('.')[0]
@@ -525,11 +527,11 @@ class LeaderboardEvaluator(object):
                 self.client.start_recorder("{}/{}_rep{}.log".format(args.record, config.name, config.repetition_index))
             self.manager.load_scenario(self.route_scenario, self.agent_instance, config.index, config.repetition_index)
             self.manager.tick_count = 0
-            
+
             # Pass scenario reference to agent for infraction tracking (if supported)
             if hasattr(self.agent_instance, 'set_scenario'):
                 self.agent_instance.set_scenario(self.route_scenario)
-            
+
             self.manager.run_scenario()
 
         except AgentError:
@@ -575,7 +577,6 @@ class LeaderboardEvaluator(object):
         """
         Run the challenge mode
         """
-
         if self.world_size > 1:
             # Multi-GPU: use shared route pool so any rank can pick any route
             pool_dir = os.path.dirname(self.statistics_manager._endpoint)
@@ -657,9 +658,6 @@ class LeaderboardEvaluator(object):
         if self._ros1_server is not None:
             self._ros1_server.shutdown()
 
-        # Go back to asynchronous mode
-        # self._reset_world_settings()
-
         if not crashed:
             # Save global statistics
             print(f"cost time={time.time()-t1}", flush=True)
@@ -672,6 +670,7 @@ class LeaderboardEvaluator(object):
             pass
 
         return crashed
+
 
 def main():
     description = "CARLA AD Leaderboard Evaluation: evaluate your Agent in CARLA scenarios\n"
@@ -733,6 +732,7 @@ def main():
         sys.exit(-1)
     else:
         sys.exit(0)
+
 
 if __name__ == '__main__':
     main()

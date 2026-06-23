@@ -259,7 +259,7 @@ class VideoRecorder:
 
         # Save as PNG for demo (higher quality for presentation)
         if self.config.produce_demo_image:
-            save_path_demo = str(self.config.save_path / "demo_images")
+            save_path_demo = os.path.join(self.config.route_output_dir, "demo_images")
             os.makedirs(save_path_demo, exist_ok=True)
             PIL.Image.fromarray(cv2.cvtColor(concatenated, cv2.COLOR_BGR2RGB)).save(
                 f"{save_path_demo}/{str(self.step).zfill(5)}.png",
@@ -481,7 +481,7 @@ class VideoRecorder:
         ):
             return
 
-        save_path_input = str(self.config.save_path / "input_images")
+        save_path_input = os.path.join(self.config.route_output_dir, "input_images")
         os.makedirs(save_path_input, exist_ok=True)
         input_image_rgb = cv2.cvtColor(input_image, cv2.COLOR_BGR2RGB)
         PIL.Image.fromarray(input_image_rgb).save(
@@ -528,7 +528,7 @@ class VideoRecorder:
         ):
             return
 
-        save_dir = self.config.save_path / "debug_images"
+        save_dir = os.path.join(self.config.route_output_dir, "debug_images")
         os.makedirs(save_dir, exist_ok=True)
         PIL.Image.fromarray(image).save(
             f"{save_dir}/{str(self.step).zfill(5)}.png",
@@ -705,7 +705,7 @@ class VideoRecorder:
 
         # Save as PNG for grid image
         if self.config.produce_grid_image:
-            save_path_grid = str(self.config.save_path / "grid_images")
+            save_path_grid = os.path.join(self.config.route_output_dir, "grid_images")
             os.makedirs(save_path_grid, exist_ok=True)
             PIL.Image.fromarray(cv2.cvtColor(grid_image, cv2.COLOR_BGR2RGB)).save(
                 f"{save_path_grid}/{str(self.step).zfill(5)}.png",

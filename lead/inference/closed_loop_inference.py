@@ -315,6 +315,149 @@ class ClosedLoopInference(OpenLoopInference):
         )
 
         return steer, throttle, float(brake), pred_target_speed
+    
+    @jt.jaxtyped(typechecker=beartype)
+    def execute_route_and_best_speed_target_speed(
+        self,
+        pred_checkpoints: jt.Float[torch.Tensor, "1 num_checkpoints 2"],
+        pred_speed_logits: jt.Float[torch.Tensor, "B N M S"],
+        speed: jt.Float[torch.Tensor, "1 1"],
+        given_target_speed: float | None = None,
+        ego_vehicle_location: float = 0.0,
+        ego_vehicle_rotation: float = 0.0,
+    ) -> tuple[float, float, float, float]:
+        """Predicts vehicle control with a PID controller. Use route and speed scores.
+
+        Variant of :meth:`execute_route_and_best_speed` for the Bench2Drive-Speed
+        benchmark: the leaderboard provides a desired ``given_target_speed`` (m/s)
+        that the agent should follow. The model still predicts the set of feasible
+        (safe) speed bins; the commanded speed is the highest feasible speed that
+        does not exceed the given target speed, so the agent never drives faster
+        than desired nor faster than is safe.
+
+        Args:
+            pred_checkpoints: Predicted route checkpoints in ego-vehicle coordinates. [B, T, 2]
+            pred_speed_logits: Predicted speed scores for pre-defined speed bins. [B, NUM_PATH, NUM_MODE, NUM_SPEED_BINS]
+            speed: Current speed of the vehicle in m/s.
+            given_target_speed: Desired target speed in m/s from the leaderboard, or None if unavailable.
+            ego_vehicle_location: Current lateral location of the ego vehicle.
+            ego_vehicle_rotation: Current rotation of the ego vehicle.
+        Returns:
+            steer: Steering command in [-1, 1]
+            throttle: Throttle command in [0, 1]
+            brake: Brake command in [0, 1]
+            pred_target_speed: Target speed in m/s
+        """
+        def get_desired_speed_from_scores(pred_speed_scores, threshold=0.3, accel_awareness=False, curr_speed=None):
+            # Find bins where all criteria have non-zero scores
+            valid_bins = np.all(pred_speed_scores > threshold, axis=0)  # shape: [S], True if all criteria > 0
+            # Filter valid bins based on acceleration awareness
+            if accel_awareness:
+                assert curr_speed is not None, "Current speed must be provided for acceleration awareness"
+
+                curr_speed_idx = np.searchsorted(self.speed_bins, curr_speed, side='right') - 1
+                curr_speed_idx = np.clip(curr_speed_idx, 0, len(self.speed_bins) - 1)
+                # For bins higher than the current speed, check that all bins between it and curr_speed_idx are also valid
+                connected_bins = np.zeros_like(valid_bins)
+                for i in range(len(valid_bins)):
+                    if i > curr_speed_idx:
+                        # accelerating checks for feasability
+                        if np.all(valid_bins[curr_speed_idx + 1:i + 1]):
+                            connected_bins[i] = True
+                    else:
+                        # braking is faster and safety critical
+                        connected_bins[i] = valid_bins[i]
+                valid_bins = connected_bins
+
+            # Choose bin index
+            if np.any(valid_bins):
+                valid_candidates = np.where(valid_bins)[0]
+                if given_target_speed is not None:
+                    # Cap the desired speed by the feasible bins: pick the highest
+                    # feasible bin whose speed does not exceed the given target speed.
+                    feasible_speeds = np.asarray(self.speed_bins)[valid_candidates]
+                    allowed = valid_candidates[feasible_speeds <= given_target_speed]
+                    if len(allowed) > 0:
+                        best_speed_bin_idx = int(np.max(allowed))
+                    else:
+                        # No feasible bin at or below the desired speed -> drive as
+                        # slow as the slowest feasible (safe) bin.
+                        best_speed_bin_idx = int(np.min(valid_candidates))
+                else:
+                    # best_speed_bin_idx = int(np.median(valid_candidates))
+                    # best_speed_bin_idx = int(np.max(valid_candidates))
+                    best_speed_bin_idx = int(np.percentile(valid_candidates, 50, interpolation='higher')) # like median but rounds up
+            else:
+                # Fallback: 0 m/s
+                best_speed_bin_idx = 0
+            target_speed = self.speed_bins[best_speed_bin_idx]
+            return target_speed
+        
+        def stop_sign_controller():
+            """Looks at pred scores to check whether a stop sign has been detected.
+            It handles the temporal aspect of stop signs and overwrites predictions if necessary."""
+            stop_scores = pred_speed_scores[2:3]
+           
+            valid_bins = np.all(stop_scores > self.config_closed_loop.score_threshold, axis=0)
+            valid_candidates = np.where(valid_bins)[0]
+            max_valid_idx = int(np.max(valid_candidates))
+           
+            if max_valid_idx <= 1:
+                stop_scores[:, 1:2] = 0.0  # overwritten in place with pred_speed_scores
+                do_stop = True
+            else:
+                do_stop = False
+           
+            if not do_stop and speed > 5.0:
+                # If stop sign is not detected, reset stop completed status
+                self.stop_completed = False
+                self.stop_wait_count = 0
+            if self.stop_completed:
+                # overwrite scores when stop is completed
+                pred_speed_scores[2:3] = np.ones_like(stop_scores)
+                return pred_speed_scores
+            
+            if do_stop and speed < 0.01:
+                # If stop sign is detected and we are stopped, wait 1 second (20 frames)
+                self.stop_wait_count += 1
+                if self.stop_wait_count >= self.config_closed_loop.stop_sign_wait_frames:
+                    self.stop_completed = True
+            else:
+                self.stop_wait_count = 0
+
+            return pred_speed_scores
+        
+        pred_checkpoints = pred_checkpoints[0].data.cpu().float().numpy()
+        speed = float(speed[0].data.cpu().float().numpy())
+        pred_speed_logits = pred_speed_logits.cpu().float().numpy()
+        pred_speed_logits = pred_speed_logits[0][0] # .float()  # shape: [M, S], M=criteria, S=speed bins
+        pred_speed_scores = 1 / (1 + np.exp(-pred_speed_logits))
+        stop_sign_controller()
+        pred_target_speed = get_desired_speed_from_scores(
+            pred_speed_scores,
+            threshold=self.config_closed_loop.score_threshold,
+            accel_awareness=self.config_closed_loop.acceleration_aware_speed_selection,
+            curr_speed=speed
+        )
+
+
+        brake = bool(
+            pred_target_speed < 0.01
+            or (speed / pred_target_speed) > self.config_closed_loop.brake_ratio
+        )
+        steer = self.lateral_route_controller.step(
+            pred_checkpoints,
+            speed,
+            ego_vehicle_location,
+            ego_vehicle_rotation,
+            sensor_agent_steer_correction=self.config_closed_loop.sensor_agent_steer_correction,
+        )
+        pred_target_speed = float(pred_target_speed)
+        throttle, brake = get_throttle(
+            brake, pred_target_speed, speed, self.config_expert
+        )
+
+        return steer, throttle, float(brake), pred_target_speed
 
     @beartype
     def ensemble(
@@ -356,13 +499,38 @@ class ClosedLoopInference(OpenLoopInference):
         if open_loop_prediction.pred_clapad is not None: # CLAP-AD control logic
             pred_route = open_loop_prediction.pred_clapad["sdc_traj"]
             speed_scores =  open_loop_prediction.pred_clapad["speed_logits"]
-            route_steer, target_speed_throttle, target_speed_brake, pred_target_speed = (
-                self.execute_route_and_best_speed(
-                    pred_route,
-                    speed_scores,
-                    ego_speed,
+            # Bench2Drive-Speed: follow the leaderboard-provided desired speed,
+            # capped by the model's predicted feasible (safe) speed.
+            given_target_speed = data.get("given_target_speed", None)
+            if (
+                self.config_closed_loop.is_bench2drive_speed
+                and given_target_speed is not None
+            ):
+                given_target_speed_value = float(
+                    given_target_speed.reshape(-1)[0].item()
+                    if torch.is_tensor(given_target_speed)
+                    else given_target_speed
                 )
-            )
+                # A non-positive / NaN value means "no plan available" -> fall back
+                # to the model's own best speed.
+                if not np.isfinite(given_target_speed_value) or given_target_speed_value < 0.0:
+                    given_target_speed_value = None
+                route_steer, target_speed_throttle, target_speed_brake, pred_target_speed = (
+                    self.execute_route_and_best_speed_target_speed(
+                        pred_route,
+                        speed_scores,
+                        ego_speed,
+                        given_target_speed=given_target_speed_value,
+                    )
+                )
+            else:
+                route_steer, target_speed_throttle, target_speed_brake, pred_target_speed = (
+                    self.execute_route_and_best_speed(
+                        pred_route,
+                        speed_scores,
+                        ego_speed,
+                    )
+                )
             steer = route_steer
             throttle = target_speed_throttle
             brake = target_speed_brake

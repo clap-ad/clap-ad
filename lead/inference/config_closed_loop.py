@@ -221,36 +221,53 @@ class ClosedLoopConfig(OpenLoopConfig):
         return bool(os.getenv("IS_BENCH2DRIVE", "False"))
 
     @property
+    def is_bench2drive_speed(self):
+        """Check if running the desired-speed Bench2Drive-Speed benchmark.
+
+        When enabled, the leaderboard provides a per-location target speed
+        (via ``get_planned_speed``) that the agent should follow, capped by the
+        model's predicted feasible speed.
+        """
+        return os.getenv("IS_BENCH2DRIVE_SPEED", "0") == "1"
+
+    @property
     def route_id(self):
         """Get the benchmark route ID from environment."""
         return os.environ["BENCHMARK_ROUTE_ID"]
 
     @property
+    def route_output_dir(self):
+        """Get and create a per-route subfolder for all of this route's outputs."""
+        path = os.path.join(self.save_path, self.route_id)
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    @property
     def debug_video_path(self):
         """Get the path for video output."""
-        return os.path.join(self.save_path, f"{self.route_id}_debug.mp4")
+        return os.path.join(self.route_output_dir, f"{self.route_id}_debug.mp4")
 
     @property
     def demo_video_path(self):
         """Get the path for demo video output."""
-        return os.path.join(self.save_path, f"{self.route_id}_demo.mp4")
+        return os.path.join(self.route_output_dir, f"{self.route_id}_demo.mp4")
 
     @property
     def input_log_path(self):
         """Get and create the path for input logging."""
-        path = os.path.join(self.save_path, "input_log")
+        path = os.path.join(self.route_output_dir, "input_log")
         os.makedirs(path, exist_ok=True)
         return path
 
     @property
     def input_video_path(self):
         """Get the path for input video output."""
-        return os.path.join(self.save_path, f"{self.route_id}_input.mp4")
+        return os.path.join(self.route_output_dir, f"{self.route_id}_input.mp4")
 
     @property
     def grid_video_path(self):
         """Get the path for grid video output."""
-        return os.path.join(self.save_path, f"{self.route_id}_grid.mp4")
+        return os.path.join(self.route_output_dir, f"{self.route_id}_grid.mp4")
 
     @overridable_property
     def video_fps(self):

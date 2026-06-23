@@ -28,6 +28,7 @@ class LeaderboardType(Enum):
 
     STANDARD = "standard"
     BENCH2DRIVE = "bench2drive"
+    BENCH2DRIVE_SPEED = "bench2drive_speed"
     FAIL2DRIVE = "fail2drive"
     AUTOPILOT = "autopilot"
 
@@ -45,6 +46,7 @@ class ModeConfig:
         checkpoint: str | None,
         routes: str,
         use_py123d: bool = False,
+        is_bench2drive_speed: bool = False,
     ) -> tuple[LeaderboardType, str, str, str | None, str]:
         """Get mode configuration based on CLI arguments.
 
@@ -56,6 +58,7 @@ class ModeConfig:
             checkpoint: Model checkpoint path (None for expert)
             routes: Routes file path
             use_py123d: Whether to use expert_py123d.py instead of expert.py
+            is_bench2drive_speed: Whether the desired-speed Bench2Drive-Speed variant is selected
 
         Returns:
             Tuple of (leaderboard_type, agent, agent_config, checkpoint_dir, track)
@@ -77,6 +80,8 @@ class ModeConfig:
         def _resolve_leaderboard_type() -> LeaderboardType:
             if is_fail2drive:
                 return LeaderboardType.FAIL2DRIVE
+            if is_bench2drive_speed:
+                return LeaderboardType.BENCH2DRIVE_SPEED
             if is_bench2drive:
                 return LeaderboardType.BENCH2DRIVE
             return LeaderboardType.STANDARD
@@ -182,6 +187,23 @@ class LeaderboardWrapper:
                 / "3rd_party/Bench2Drive/scenario_runner",
                 "evaluator_script": self.workspace_root
                 / f"3rd_party/Bench2Drive/leaderboard/leaderboard/{evaluator_name}",
+                "evaluator_module": "leaderboard.leaderboard_evaluator",
+                "carla_path": self.workspace_root
+                / "3rd_party/CARLA_0915/PythonAPI/carla",
+            }
+        elif self.leaderboard_type == LeaderboardType.BENCH2DRIVE_SPEED:
+            evaluator_name = (
+                "leaderboard_evaluator_multigpu.py"
+                if getattr(self.args, "multigpu", False)
+                else "leaderboard_evaluator.py"
+            )
+            return {
+                "leaderboard_root": self.workspace_root
+                / "3rd_party/Bench2Drive-Speed/Bench2Drive/leaderboard",
+                "scenario_runner_root": self.workspace_root
+                / "3rd_party/Bench2Drive-Speed/Bench2Drive/scenario_runner",
+                "evaluator_script": self.workspace_root
+                / f"3rd_party/Bench2Drive-Speed/Bench2Drive/leaderboard/leaderboard/{evaluator_name}",
                 "evaluator_module": "leaderboard.leaderboard_evaluator",
                 "carla_path": self.workspace_root
                 / "3rd_party/CARLA_0915/PythonAPI/carla",
@@ -350,7 +372,11 @@ class LeaderboardWrapper:
             "SCENARIO_TYPE": self.scenario_type,
             "PYTHONUNBUFFERED": "1",
             "IS_BENCH2DRIVE": "1"
-            if self.leaderboard_type == LeaderboardType.BENCH2DRIVE
+            if self.leaderboard_type
+            in (LeaderboardType.BENCH2DRIVE, LeaderboardType.BENCH2DRIVE_SPEED)
+            else "0",
+            "IS_BENCH2DRIVE_SPEED": "1"
+            if self.leaderboard_type == LeaderboardType.BENCH2DRIVE_SPEED
             else "0",
             "OUTPUT_DIR": str(resolved_output_dir),
             "EVALUATION_OUTPUT_DIR": str(resolved_output_dir),
@@ -456,6 +482,7 @@ class LeaderboardWrapper:
                 checkpoint=self.args.checkpoint,
                 routes=str(self.routes),
                 use_py123d=self.args.py123d if hasattr(self.args, "py123d") else False,
+                is_bench2drive_speed=getattr(self.args, "bench2drive_speed", False),
             )
         )
         self.leaderboard_type = leaderboard_type
@@ -694,6 +721,11 @@ Examples:
         "--bench2drive",
         action="store_true",
         help="Use Bench2Drive leaderboard",
+    )
+    parser.add_argument(
+        "--bench2drive-speed",
+        action="store_true",
+        help="Use Bench2Drive-Speed leaderboard (desired-speed conditioned evaluation)",
     )
     parser.add_argument(
         "--fail2drive",

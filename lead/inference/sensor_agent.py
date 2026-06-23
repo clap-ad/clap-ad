@@ -477,6 +477,24 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
             "town": np.array([self._world.get_map().name.split("/")[-1]]),
         }
 
+        # Bench2Drive-Speed: provide the leaderboard's desired target speed (m/s)
+        # so it can be used in the control decision. ``get_planned_speed`` returns
+        # the target speed in km/h (or None when no plan node is nearby).
+        if self.config_closed_loop.is_bench2drive_speed and hasattr(
+            self, "get_planned_speed"
+        ):
+            planned_speed_kmh = self.get_planned_speed()
+            given_target_speed_ms = (
+                float(planned_speed_kmh) / 3.6
+                if planned_speed_kmh is not None
+                else -1.0
+            )
+            input_data_tensors["given_target_speed"] = (
+                torch.Tensor([given_target_speed_ms])
+                .to(self.device, dtype=torch.float32)
+                .view(1)
+            )
+
         # Add radar data if available
         if self.training_config.use_radars and "radar" in input_data:
             input_data_tensors["radar"] = torch.Tensor(input_data["radar"]).to(
@@ -654,7 +672,7 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
             metric = self.get_metric_info()
             self.metric_info[self.step] = metric
             with open(
-                f"{self.config_closed_loop.save_path}/metric_info.json",
+                f"{self.config_closed_loop.route_output_dir}/metric_info.json",
                 "w",
             ) as outfile:
                 json.dump(self.metric_info, outfile, indent=4)
