@@ -1538,11 +1538,11 @@ def iterative_line_interpolation(
 
         else:  # We hit the end of the input route. We extrapolate the last 2 points
             current_point = route[-1]
-            last_point = route[-2]
+            last_point = last_interpolated_point #route[-2]
             intersection = circle_line_segment_intersection(
                 circle_center=last_interpolated_point,
                 circle_radius=min_distance,
-                pt1=last_point,
+                pt1=last_interpolated_point,
                 pt2=current_point,
                 full_line=True,
             )
