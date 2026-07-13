@@ -1003,22 +1003,28 @@ class Visualizer:
                     color=color,
                     thickness=-1,
                 )
+    def _get_speed_bins(self):
+        """Return the speed bin edges from config as a plain Python list."""
+        speed_bins = self.config.speed_bins
+        if isinstance(speed_bins, torch.Tensor):
+            speed_bins = speed_bins.detach().cpu().tolist()
+        return list(speed_bins)
+
     def _pred_speed_logits_clap(self):
         pred_speed_logits_clap = self.predictions.pred_clapad["speed_logits"]
         if pred_speed_logits_clap is not None:
-            sp_logits = pred_speed_logits_clap.detach().cpu().float().numpy()[0] # (5, 3, 7)
-            sp_logits = sp_logits[0]  # Select score for the non-aug traj (3, 7)
+            sp_logits = pred_speed_logits_clap.detach().cpu().float().numpy()[0] # (NUM_PATH, NUM_MODE, NUM_SPEED_BINS)
+            sp_logits = sp_logits[0]  # Select score for the non-aug traj (NUM_MODE, NUM_SPEED_BINS)
             # Apply normalization
             sp_logits  = 1 / (1 + np.exp(-sp_logits))
-            # Assume speed_bins are available in config or constants
-            speed_bins =[0, 2.5, 5, 7, 8.5, 10, 12]
+            speed_bins = self._get_speed_bins()
             # Draw the bar plot as an image
             bar_img = draw_speed_scores_append_bottom(self.bev_image, sp_logits, speed_bins)
             self.barplot = bar_img
 
     def _gt_speed_logits_clap(self):
         """Visualize ground truth speed logits given models predicted path."""
-        speed_bins =[0, 2.5, 5, 7, 8.5, 10, 12]
+        speed_bins = self._get_speed_bins()
         ttc_time_horizon = self.config.ttc_time_horizon # in seconds
         self.loss_speed = SpeedScoringLoss(
             speed_bins=speed_bins,
@@ -1745,40 +1751,46 @@ def draw_speed_scores_append_bottom(image, sp_logits, speed_bins, incl_gt_score=
     import numpy as np
     import cv2
 
-    bins = np.array(speed_bins)
+    bins = np.asarray(speed_bins)
+    num_bins = len(bins)
+    x = np.arange(num_bins)
 
-    # Only draw the bar plot (no image subplot)
-    fig, ax_bar = plt.subplots(figsize=(image.shape[1] / 100, 2.5))  # width in inches
-    bar_width = 0.3
-    ax_bar.bar(bins - bar_width, sp_logits[0], width=bar_width, label='TTC')
-    ax_bar.bar(bins, sp_logits[1], width=bar_width, label='Traffic Light')
+    # Only draw the bar plot (no image subplot). Widen the figure when there are
+    # many bins so the bars/labels stay legible.
+    fig_width = max(image.shape[1] / 100, num_bins * 0.6)
+    fig, ax_bar = plt.subplots(figsize=(fig_width, 2.5))
+
+    # Build the list of series to plot so the layout adapts to the number of
+    # available scores (e.g. with or without the optional overtake score).
     stop_label = 'Stop Sign (ignored)' if stop_completed else 'Stop Sign'
     stop_color = '0.75' if stop_completed else None
     stop_alpha = 0.6 if stop_completed else 1.0
-    ax_bar.bar(
-        bins + bar_width,
-        sp_logits[2],
-        width=bar_width,
-        label=stop_label,
-        color=stop_color,
-        alpha=stop_alpha,
-    )
-    if sp_logits.shape[0] == 4: # overtake score exists
-        ot_label = 'Overtake'
-        ot_color = 'red'
-        ot_alpha = 1
+    series = [
+        (sp_logits[0], 'TTC', None, 1.0),
+        (sp_logits[1], 'Traffic Light', None, 1.0),
+        (sp_logits[2], stop_label, stop_color, stop_alpha),
+    ]
+    if sp_logits.shape[0] == 4:  # overtake score exists
+        series.append((sp_logits[3], 'Overtake', 'red', 1.0))
+
+    num_series = len(series)
+    total_width = 0.8
+    bar_width = total_width / num_series
+    offsets = (np.arange(num_series) - (num_series - 1) / 2) * bar_width
+    for (data, label, color, alpha), offset in zip(series, offsets, strict=False):
         ax_bar.bar(
-            bins + 2*bar_width,
-            sp_logits[3],
+            x + offset,
+            data,
             width=bar_width,
-            label=ot_label,
-            color=ot_color,
-            alpha=ot_alpha,
+            label=label,
+            color=color,
+            alpha=alpha,
         )
-    ax_bar.set_xlabel('Speed Bin')
+    ax_bar.set_xlabel('Speed Bin (m/s)')
     ax_bar.set_ylabel('Score')
     ax_bar.legend()
-    ax_bar.set_xticks(bins)
+    ax_bar.set_xticks(x)
+    ax_bar.set_xticklabels([f"{b:g}" for b in bins], rotation=45, fontsize=7)
     ax_bar.set_title(title)
     plt.tight_layout()
 
@@ -1805,7 +1817,9 @@ def draw_speed_scores(image, sp_logits, speed_bins, incl_gt_score=False, stop_co
     import numpy as np
     import cv2
 
-    bins = np.array(speed_bins)
+    bins = np.asarray(speed_bins)
+    num_bins = len(bins)
+    x = np.arange(num_bins)
 
     # Plot image and bar plots
     if not incl_gt_score:
@@ -1827,24 +1841,35 @@ def draw_speed_scores(image, sp_logits, speed_bins, incl_gt_score=False, stop_co
 
         # Bar plot subplot
         ax_bar = fig.add_subplot(gs[1])
-        bar_width = 0.3
-        ax_bar.bar(bins - bar_width, sp_logits[0], width=bar_width, label='TTC')
-        ax_bar.bar(bins, sp_logits[1], width=bar_width, label='Traffic Light')
         stop_label = 'Stop Sign (ignored)' if stop_completed else 'Stop Sign'
         stop_color = '0.75' if stop_completed else None
         stop_alpha = 0.6 if stop_completed else 1.0
-        ax_bar.bar(
-            bins + bar_width,
-            sp_logits[2],
-            width=bar_width,
-            label=stop_label,
-            color=stop_color,
-            alpha=stop_alpha,
-        )
-        ax_bar.set_xlabel('Speed Bin')
+        series = [
+            (sp_logits[0], 'TTC', None, 1.0),
+            (sp_logits[1], 'Traffic Light', None, 1.0),
+            (sp_logits[2], stop_label, stop_color, stop_alpha),
+        ]
+        if sp_logits.shape[0] == 4:  # overtake score exists
+            series.append((sp_logits[3], 'Overtake', 'red', 1.0))
+
+        num_series = len(series)
+        total_width = 0.8
+        bar_width = total_width / num_series
+        offsets = (np.arange(num_series) - (num_series - 1) / 2) * bar_width
+        for (data, label, color, alpha), offset in zip(series, offsets, strict=False):
+            ax_bar.bar(
+                x + offset,
+                data,
+                width=bar_width,
+                label=label,
+                color=color,
+                alpha=alpha,
+            )
+        ax_bar.set_xlabel('Speed Bin (m/s)')
         ax_bar.set_ylabel('Score')
         ax_bar.legend()
-        ax_bar.set_xticks(bins)
+        ax_bar.set_xticks(x)
+        ax_bar.set_xticklabels([f"{b:g}" for b in bins], rotation=45, fontsize=7)
         ax_bar.set_title('Speed Logits over Bins')
     else:
         raise NotImplementedError("Including GT score in the plot is not implemented yet.")
