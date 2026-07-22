@@ -686,6 +686,11 @@ class TrainingConfig(BaseConfig):
     # Use CLAP-AD head
     use_clapad_head = True
 
+    # Hidden layer sizes (as multipliers of transfuser_token_dim) for the
+    # CLAP-AD path prediction head MLP. An empty list uses a single linear
+    # layer (nn.Linear(embed_dims, 2)), which is the current default
+    path_head_hidden_dim_multipliers = []
+
 
     # Used for TFv5 planning decoder
     gru_hidden_size = 64

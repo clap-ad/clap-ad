@@ -73,7 +73,7 @@ class PlanningHeadClap(nn.Module):
             norm=nn.LayerNorm(self.config.transfuser_token_dim),
         )
         # Single linear head, matching PlanningDecoder.route_decoder.
-        self.path_fc = nn.Linear(embed_dims, 2)
+        self.path_fc = self._build_path_head(embed_dims)
         num_modes = 4 # TTC - TF-light - Stop sign - Overtake
         assert num_modes > 1
         # use same speed head for time-to-collision (TTC) and traffic light (TL) branches
@@ -161,6 +161,30 @@ class PlanningHeadClap(nn.Module):
         # encoding on the path query, all route slots are identical, collapsing
         # the predicted route to a straight line. Matches PlanningDecoder.
         nn.init.uniform_(self.path_query)
+
+    def _build_path_head(self, embed_dims):
+        """Build the path prediction head.
+
+        Uses ``config.path_head_hidden_dim_multipliers`` to decide the
+        architecture. An empty list yields a single ``nn.Linear(embed_dims, 2)``.
+        A non-empty list of multipliers ``m`` yields an MLP with hidden layers of
+        size ``int(embed_dims * m)`` separated by ReLU activations, e.g. ``[2, 1]``
+        reproduces the v5 head
+        ``Linear(D, 2D) -> ReLU -> Linear(2D, D) -> ReLU -> Linear(D, 2)``.
+        """
+        multipliers = self.config.path_head_hidden_dim_multipliers
+        if not multipliers:
+            return nn.Linear(embed_dims, 2)
+
+        layers = []
+        in_dim = embed_dims
+        for multiplier in multipliers:
+            hidden_dim = int(embed_dims * multiplier)
+            layers.append(nn.Linear(in_dim, hidden_dim))
+            layers.append(nn.ReLU())
+            in_dim = hidden_dim
+        layers.append(nn.Linear(in_dim, 2))
+        return nn.Sequential(*layers)
 
     def forward_train(self,
                       bev_embed, 
