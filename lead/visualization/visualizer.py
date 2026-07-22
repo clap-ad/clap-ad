@@ -970,7 +970,7 @@ class Visualizer:
         pred_route = self.predictions.pred_route
         if pred_route is not None:
             wps = pred_route.detach().cpu().float().numpy()[0]
-            for i in range(len(wps) - 1):
+            for i in range(len(wps)):
                 x1 = int(wps[i][0] * self.loc_pixels_per_meter + self.origin[0])
                 y1 = int(wps[i][1] * self.loc_pixels_per_meter + self.origin[1])
                 color = viz_utils.lighter_shade(
@@ -990,7 +990,7 @@ class Visualizer:
         pred_route_clap = self.predictions.pred_clapad["sdc_traj"]
         if pred_route_clap is not None:
             wps = pred_route_clap.detach().cpu().float().numpy()[0]
-            for i in range(len(wps) - 1):
+            for i in range(len(wps)):
                 x1 = int(wps[i][0] * self.loc_pixels_per_meter + self.origin[0])
                 y1 = int(wps[i][1] * self.loc_pixels_per_meter + self.origin[1])
                 color = viz_utils.lighter_shade(

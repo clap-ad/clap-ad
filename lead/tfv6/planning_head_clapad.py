@@ -110,7 +110,9 @@ class PlanningHeadClap(nn.Module):
                 "ttc_cfg":{
                     "time_horizon": ttc_time_horizon,
                     "coll_radius": 0.1,
-                    "safe_distance": 0.5
+                    "safe_distance": 0.5,
+                    "use_speed_dependent_horizon": self.config.use_speed_dependent_ttc_horizon,
+                    "time_horizon_slow": self.config.ttc_time_horizon_slow,
                 },
                 "traffic_rule_cfg":{
                     "speed_thresh":0.1,
@@ -487,6 +489,11 @@ class SpeedScoringLoss(nn.Module):
         self.time_horizon = self.ttc_cfg.get('time_horizon', 0.5)
         self.coll_radius = self.ttc_cfg.get('coll_radius', 0.1) # Below which we consider collision
         self.safe_distance = self.ttc_cfg.get('safe_distance', 0.5) # Above which we consider safe
+        # If enabled, use a per-speed-bin time horizon for the TTC ground truth: the
+        # highest speed bin uses time_horizon, the lowest uses time_horizon_slow, and
+        # intermediate speeds are linearly interpolated.
+        self.use_speed_dependent_horizon = self.ttc_cfg.get('use_speed_dependent_horizon', False)
+        self.time_horizon_slow = self.ttc_cfg.get('time_horizon_slow', 1.0)
         # CARLA values multiplied by 2 because CARLA considers half-size
         self.ego_wl = [0.9183566570281982 * 2, 2.44619083404541 * 2]
         # Traffic Rule Adherence Config
@@ -543,7 +550,8 @@ class SpeedScoringLoss(nn.Module):
                 safe_distance=self.safe_distance,
                 coll_radius=self.coll_radius,
                 ego_wl=self.ego_wl,
-                cuda_device=cuda_device
+                cuda_device=cuda_device,
+                time_horizon_slow=self.time_horizon_slow if self.use_speed_dependent_horizon else None
             )  # [B, K, S_CLS]
         else:
             # If no augmentation, expand path_pred to [B, 1, T, 2] for consistent indexing
@@ -556,7 +564,8 @@ class SpeedScoringLoss(nn.Module):
                 safe_distance=self.safe_distance,
                 coll_radius=self.coll_radius,
                 ego_wl=self.ego_wl,
-                cuda_device=cuda_device
+                cuda_device=cuda_device,
+                time_horizon_slow=self.time_horizon_slow if self.use_speed_dependent_horizon else None
             )  # [B, 1, S_CLS]
 
         # Compute other scores once (not per path)

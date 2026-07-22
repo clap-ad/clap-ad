@@ -714,13 +714,45 @@ class TrainingConfig(BaseConfig):
     num_route_points_smoothing = 50
     # Number of route checkpoints to predict. Needs to be smaller than num_route_points_smoothing!
     # num_route_points_prediction = 10
-    num_route_points_prediction = 48
+    num_route_points_prediction = 40
     ttc_time_horizon = 2.0 # seconds
+    # If true, use speed-dependent time horizons for TTC (collision) scoring.
+    # The GT for the highest speed bin is computed with ttc_time_horizon while the
+    # GT for the lowest speed bin is computed with ttc_time_horizon_slow, with
+    # intermediate speeds linearly interpolated between the two.
+    use_speed_dependent_ttc_horizon = False
+    # Time horizon (seconds) used for the lowest speed bin when
+    # use_speed_dependent_ttc_horizon is enabled.
+    ttc_time_horizon_slow = 1.0
     # Assume maximum distance between two future waypoints in meters.
     max_distance_future_waypoint = 10.0
-    target_first_distance = 0.5 #. 1 meters between waypoints
+    target_first_distance = 2.5 # same as lead
     use_tf_context_encoder = True # To use path and context (radar) as tf
-    speed_bins=torch.tensor([0, 1, 2, 3, 4, 5, 6]) # speed bins for the speed head
+    # speed bins for the speed head
+    speed_bins = torch.tensor([
+        0.0,
+        2.77777778,
+        5.55555556,
+        6.94444444,
+        8.33333333,
+        9.72222222,
+        11.11111111,
+        12.5,
+        13.88888889,
+        15.27777778,
+        16.66666667,
+        18.05555556,
+        19.44444444
+    ]) # Changed for B2D-Speed benchmark
+    # speed_bins = torch.tensor([
+    #     0.0,
+    #     2.5,
+    #     5.0,
+    #     7.0,
+    #     8.5,
+    #     10.0,
+    #     12.0,
+    # ]) # paper
 
     @property
     def num_way_points_prediction(self):

@@ -513,7 +513,7 @@ def point_to_seg(P, A, B):
     return ((P - proj) ** 2).sum(dim=-1)  # squared distance (no sqrt)
 
 
-def _compute_min_distance_traj_batched_multipath(ego_traj, obj_traj, ego_wl, obj_wl, cuda_device, ego_yaws, obj_yaws):
+def _compute_min_distance_traj_batched_multipath(ego_traj, obj_traj, ego_wl, obj_wl, cuda_device, ego_yaws, obj_yaws, time_mask=None):
     """
     Fully vectorized batched version (no for-loop over batches).
     ego_traj: [B, K, S, T, 2]
@@ -522,6 +522,9 @@ def _compute_min_distance_traj_batched_multipath(ego_traj, obj_traj, ego_wl, obj
     obj_wl: [B, A, 2]
     ego_yaws: [B, K, S, T+1]
     obj_yaws: [B, A, T+1]
+    time_mask: [S, T] boolean mask (True = time step counts for that speed bin) or None.
+        Used to apply a per-speed-bin time horizon by ignoring later time steps for
+        slower bins.
     Returns: [B, K, S, A] minimum distance for each batch/actor.
     """
     ego_yaws = ego_yaws[..., 1:]
@@ -606,6 +609,10 @@ def _compute_min_distance_traj_batched_multipath(ego_traj, obj_traj, ego_wl, obj
         min_dist[idx] = dist_f
     min_dist = torch.sqrt(min_dist)  # shape (N,)
     min_dist = min_dist.reshape(B, K, S, A, T)
+    # Apply per-speed-bin time horizon: ignore time steps beyond a bin's horizon.
+    if time_mask is not None:
+        tm = time_mask.to(device=min_dist.device).view(1, 1, S, 1, T)  # [1, 1, S, 1, T]
+        min_dist = min_dist.masked_fill(~tm, float("inf"))
     # minimum over time in torch
     min_dists = torch.min(min_dist, dim=4).values  # shape (B, K, S, A)
     # Add a visualization here to plot bounding boxes over time and their corresponding distances calculated above
@@ -1078,7 +1085,7 @@ def _build_ego_traj_multipath(path_pred, speed, time_horizon, steps=20):
 def _compute_ttc_for_bin_efficient_multipath(
         speed, path_pred, scene_score_info,
         time_horizon, safe_distance,
-        coll_radius, ego_wl, cuda_device
+        coll_radius, ego_wl, cuda_device, time_horizon_slow=None
     ):
     """Efficient multipath version: path_pred [B, K, T, 2], scene_score_info is list of B dicts.
     speed: [S] speed bins
@@ -1094,6 +1101,21 @@ def _compute_ttc_for_bin_efficient_multipath(
     p_o_now, p_o_future, obj_wl, wp_o_fut, obj_mask, agent_yaws = _build_padded_actor_info(
         scene_score_info, 20, edge_by_edge=edge_by_edge, yaw_threshold=0.05
     )
+    # Optionally build a per-speed-bin time mask so that the GT for slower speeds only
+    # considers collisions within a shorter time horizon. The ego/object trajectories
+    # share the fixed time grid built over `time_horizon`; masking out later time steps
+    # for slower bins is equivalent to using a shorter horizon for them.
+    time_mask = None
+    if time_horizon_slow is not None:
+        steps = 20
+        future_timestamps = torch.linspace(
+            time_horizon / steps, time_horizon, steps, device=speed.device
+        )  # [N]
+        s_min = speed.min()
+        s_max = speed.max()
+        frac = (speed - s_min) / (s_max - s_min + 1e-8)  # [S], 0 for slowest, 1 for fastest
+        horizon_per_bin = time_horizon_slow + frac * (time_horizon - time_horizon_slow)  # [S]
+        time_mask = future_timestamps[None, :] <= horizon_per_bin[:, None]  # [S, N]
     # Compute distances for all path predictions and speed bins
     # for now only has been implemented for fut_wp_edge, but can be implemented for other calculation types as well
     if calculation_type == "fut_wp_edge":
@@ -1104,7 +1126,8 @@ def _compute_ttc_for_bin_efficient_multipath(
             obj_wl=obj_wl, # [B, A, 2]
             ego_yaws=ego_yaws, # [B, K, S, N+1]
             obj_yaws=agent_yaws, # [B, A, N+1]
-            cuda_device=cuda_device
+            cuda_device=cuda_device,
+            time_mask=time_mask # [S, N] or None
         )
     else:
         raise ValueError(f"Unknown calculation type: {calculation_type}")
@@ -1202,16 +1225,21 @@ def _compute_ttc_for_bin_efficient(
 
 def compute_ttc(path_pred, scene_score_info, speed_bins,
                 time_horizon, safe_distance, coll_radius,
-                ego_wl, cuda_device
+                ego_wl, cuda_device, time_horizon_slow=None
     ):
     """
     Compute time-to-collision (TTC) for self.speed_bins based on scene information.
     path_pred: Tensor of shape [B, K, T, 2] - predicted future path of the ego vehicle, B is batch size, K is number of path predictions, T is time steps
-    
+
     Args:
         scene_info: Tensor of shape [B] - scene information for the current step
+        time_horizon_slow: If not None, use a speed-dependent time horizon for the GT.
+            The highest speed bin uses time_horizon, the lowest bin uses
+            time_horizon_slow, and intermediate speeds are linearly interpolated.
     """
     # Compute TTC for each speed bin based on scene information
+    if not torch.is_tensor(speed_bins):
+        speed_bins = torch.as_tensor(speed_bins, dtype=path_pred.dtype)
     ttc = _compute_ttc_for_bin_efficient_multipath(
         speed=speed_bins.to(path_pred.device),
         path_pred=path_pred,
@@ -1220,7 +1248,8 @@ def compute_ttc(path_pred, scene_score_info, speed_bins,
         safe_distance=safe_distance,
         coll_radius=coll_radius,
         ego_wl=ego_wl,
-        cuda_device=cuda_device
+        cuda_device=cuda_device,
+        time_horizon_slow=time_horizon_slow
     ) # Shape: [B, K, num_bins]
     return ttc
     ttc = []
