@@ -11,6 +11,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
@@ -453,6 +454,83 @@ class LeaderboardWrapper:
 
         return checkpoint_path, debug_checkpoint_path
 
+    def _start_general_log(self, output_dir: Path) -> None:
+        """Tee all stdout/stderr into a single general log inside the output folder.
+
+        The leaderboard evaluator subprocess inherits this process's stdout/stderr
+        file descriptors, so its output (every GPU rank) is captured here as well.
+        This produces one combined ``logs/full.log`` while still printing to the
+        console.
+        """
+        logs_dir = output_dir / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        general_log_path = logs_dir / "full.log"
+
+        # Flush Python-level buffers before rebinding the underlying fds.
+        sys.stdout.flush()
+        sys.stderr.flush()
+
+        # Launch `tee` first so it inherits the current stdout (the console); it
+        # writes to both the console and the general log file.
+        tee = subprocess.Popen(
+            ["stdbuf", "-oL", "-eL", "tee", "-a", str(general_log_path)],
+            stdin=subprocess.PIPE,
+        )
+
+        # Redirect our stdout/stderr (fd 1 and 2) into tee's stdin so everything
+        # this process and its children write flows through tee.
+        os.dup2(tee.stdin.fileno(), sys.stdout.fileno())
+        os.dup2(tee.stdin.fileno(), sys.stderr.fileno())
+
+        # Keep a reference so the pipe/process is not garbage collected.
+        self._general_log_tee = tee
+
+        # Re-configure logging now that stdout is a pipe (disables ANSI colors in
+        # the log file, matching plain-text file output).
+        setup_logging()
+        LOG.info(f"General log: {general_log_path}")
+
+    def _link_per_gpu_logs(self, logs_dir: Path, nproc: int) -> None:
+        """Create stable per-GPU log symlinks pointing at torchrun's per-rank logs.
+
+        ``torchrun`` writes each rank's ``stdout.log``/``stderr.log`` under a run
+        directory with a random suffix, so a short-lived background thread waits
+        for the files to appear and links them to predictable names inside the
+        output folder: ``gpu<rank>.log`` (stdout) and ``gpu<rank>.err.log``
+        (stderr). The combined ``full.log`` still contains every stream.
+        """
+        gpu_log_root = logs_dir / "gpu"
+        # (torchrun stream file, friendly per-GPU link name)
+        stream_links = {"stdout.log": "gpu{rank}.log", "stderr.log": "gpu{rank}.err.log"}
+
+        def _worker() -> None:
+            deadline = time.time() + 180
+            linked: set[tuple[int, str]] = set()
+            targets = nproc * len(stream_links)
+            while time.time() < deadline and len(linked) < targets:
+                for rank in range(nproc):
+                    for stream, link_tmpl in stream_links.items():
+                        key = (rank, stream)
+                        if key in linked:
+                            continue
+                        matches = sorted(
+                            gpu_log_root.glob(f"*/attempt_0/{rank}/{stream}"),
+                            key=lambda p: p.stat().st_mtime,
+                        )
+                        if not matches:
+                            continue
+                        link = logs_dir / link_tmpl.format(rank=rank)
+                        try:
+                            if link.is_symlink() or link.exists():
+                                link.unlink()
+                            link.symlink_to(matches[-1])
+                            linked.add(key)
+                        except OSError:
+                            pass
+                time.sleep(1)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def run(self) -> subprocess.CompletedProcess:
         """Execute CARLA leaderboard evaluation as subprocess.
 
@@ -506,6 +584,11 @@ class LeaderboardWrapper:
             resolved_output_path.mkdir(parents=True, exist_ok=True)
             self._setup_resume_pool(self.args.resume_pool, resolved_output_path)
 
+        # Ensure the output directory exists and start capturing all output into a
+        # single general log file inside it.
+        resolved_output_path.mkdir(parents=True, exist_ok=True)
+        self._start_general_log(resolved_output_path)
+
         # Build command directly
         checkpoint_path = resolved_output_path / "checkpoint_endpoint.json"
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
@@ -518,7 +601,10 @@ class LeaderboardWrapper:
         is_multigpu = getattr(self.args, "multigpu", False)
 
         if is_multigpu:
-            # Launch via torch.distributed.run for multi-GPU
+            # Launch via torch.distributed.run for multi-GPU. `--tee 3` streams
+            # each rank's stdout+stderr to both the console and a per-rank log
+            # file under <output>/logs/gpu, giving one log file per GPU.
+            gpu_logs_dir = resolved_output_path / "logs" / "gpu"
             cmd = [
                 sys.executable,
                 "-u",
@@ -529,8 +615,16 @@ class LeaderboardWrapper:
                 "--standalone",
                 "--nnodes=1",
                 "--node_rank=0",
+                "--tee",
+                "3",
+                "--log-dir",
+                str(gpu_logs_dir),
                 str(paths["evaluator_script"]),
             ]
+            # Link torchrun's per-rank logs to predictable gpu<rank>.log names.
+            self._link_per_gpu_logs(
+                resolved_output_path / "logs", self.args.nproc_per_node
+            )
         else:
             cmd = [
                 sys.executable,
