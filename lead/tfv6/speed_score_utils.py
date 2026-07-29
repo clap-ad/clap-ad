@@ -1468,7 +1468,11 @@ def compute_overtake_adherence(
     for b in range(B):
         rules_score = [1.0 for _ in speed_bins]
         overtake_info = scene_score_info[b].get("overtake_info", None)
-        if overtake_info is not None:
+        # `has_passed` is True once the ego has driven past the obstacle. The
+        # distance-to-trigger is an unsigned magnitude that grows again on the far
+        # side, so without this guard the "approaching" logic below would wrongly
+        # penalize speed after the obstacle. When passed, keep the default all-ones.
+        if overtake_info is not None and not overtake_info.get("has_passed", False):
             dist_to_trig = overtake_info["dist_to_trig"]
             expert_throttle = overtake_info["expert_throttle"]
             scen_type = overtake_info["type"][0]
@@ -1481,7 +1485,7 @@ def compute_overtake_adherence(
             if dist_trig_bound[0] <= dist_to_trig <= dist_trig_bound[1]:
                 if expert_throttle == 1:
                     for idx, bin_speed in enumerate(speed_bins):
-                        rules_score[idx] = 1.0 if idx != 0 else 0.0
+                        rules_score[idx] = 1.0
                 else:
                     for idx, bin_speed in enumerate(speed_bins):
                         rules_score[idx] = 0.0 if idx != 0 else 1.0

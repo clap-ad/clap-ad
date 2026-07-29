@@ -887,10 +887,19 @@ class CARLAData(Dataset):
                 elif curr_scne == "ConstructionObstacleTwoWays":
                     dist = data["dist_to_construction_site"]
                 expert_throttle = data["throttle"]
+                # The obstacle-site distance is an unsigned magnitude, so it grows
+                # again once the ego drives past the obstacle. Distinguish the two
+                # regimes via the active scenario: while approaching/alongside the
+                # obstacle it is the *current* active scenario; once the ego has
+                # passed it, the scenario has moved on and only appears as the
+                # *previous* active scenario. In the passed regime the overtake no
+                # longer constrains speed, so scores should be 1 for all bins.
+                has_passed = data["current_active_scenario_type"] != curr_scne
                 scene_dict["overtake_info"] = {
                     "type": curr_scne.lower(),
                     "dist_to_trig": dist,
-                    "expert_throttle": expert_throttle
+                    "expert_throttle": expert_throttle,
+                    "has_passed": has_passed,
                 }
 
         return scene_dict      
