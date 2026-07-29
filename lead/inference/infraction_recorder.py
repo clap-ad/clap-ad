@@ -1,5 +1,6 @@
 import json
 import logging
+import pathlib
 from typing import Any
 
 from lead.common.logging_config import setup_logging
@@ -115,7 +116,9 @@ class InfractionRecorder:
         if self.config_closed_loop.save_path is None:
             return
 
-        infractions_path = self.config_closed_loop.save_path / "infractions.json"
+        infractions_path = (
+            pathlib.Path(self.config_closed_loop.route_output_dir) / "infractions.json"
+        )
         infractions_data: dict[str, Any] = {
             "infractions": self.infractions_log,
             "video_fps": self.config_closed_loop.video_fps,
