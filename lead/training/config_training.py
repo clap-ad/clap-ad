@@ -729,6 +729,17 @@ class TrainingConfig(BaseConfig):
     # Time horizon (seconds) used for the lowest speed bin when
     # use_speed_dependent_ttc_horizon is enabled.
     ttc_time_horizon_slow = 1.0
+    # --- Speed scoring (SpeedScoringLoss) ground-truth parameters ---
+    # Distance [m] at/below which the TTC score is 0 (collision).
+    ttc_coll_radius = 0.1
+    # Distance [m] at/above which the TTC score is 1 (safe).
+    ttc_safe_distance = 0.5
+    # Speed [m/s] below which the ego is considered stopped for traffic-rule scoring.
+    traffic_rule_speed_thresh = 0.1
+    # Distance [m] from the trigger at which all stop-sign speed scores (except 0) become 0.
+    stop_sign_stop_distance = 2.0
+    # Distance [m] from the trigger at which all overtake speed scores (except 0) become 0.
+    overtake_stop_distance = 20.0
     # Assume maximum distance between two future waypoints in meters.
     max_distance_future_waypoint = 10.0
     target_first_distance = 2.5 # same as lead
@@ -758,6 +769,26 @@ class TrainingConfig(BaseConfig):
     #     10.0,
     #     12.0,
     # ]) # paper
+
+    @property
+    def speed_scoring_cfg_dict(self):
+        """Config dict for SpeedScoringLoss, shared by training and visualization."""
+        return {
+            "ttc_cfg": {
+                "time_horizon": self.ttc_time_horizon,
+                "coll_radius": self.ttc_coll_radius,
+                "safe_distance": self.ttc_safe_distance,
+                "use_speed_dependent_horizon": self.use_speed_dependent_ttc_horizon,
+                "time_horizon_slow": self.ttc_time_horizon_slow,
+            },
+            "traffic_rule_cfg": {
+                "speed_thresh": self.traffic_rule_speed_thresh,
+                "ss_stop_distance": self.stop_sign_stop_distance,
+            },
+            "overtake_cfg": {
+                "ot_stop_distance": self.overtake_stop_distance,
+            },
+        }
 
     @property
     def num_way_points_prediction(self):

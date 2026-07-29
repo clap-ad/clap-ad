@@ -103,25 +103,9 @@ class PlanningHeadClap(nn.Module):
 
         # Loss funcations
         speed_bins = self.config.speed_bins
-        ttc_time_horizon = self.config.ttc_time_horizon # in seconds
         self.loss_speed = SpeedScoringLoss(
             speed_bins=speed_bins,
-            crt_cfg_dict={
-                "ttc_cfg":{
-                    "time_horizon": ttc_time_horizon,
-                    "coll_radius": 0.1,
-                    "safe_distance": 0.5,
-                    "use_speed_dependent_horizon": self.config.use_speed_dependent_ttc_horizon,
-                    "time_horizon_slow": self.config.ttc_time_horizon_slow,
-                },
-                "traffic_rule_cfg":{
-                    "speed_thresh":0.1,
-                    "ss_stop_distance": 2.0
-                },
-                "overtake_cfg":{
-                    "ot_stop_distance": 20.0
-                }
-            },
+            crt_cfg_dict=self.config.speed_scoring_cfg_dict,
         )
         
         self.traj_or_action = 'path_speed'  # 'traj' or 'action' or 'path_speed' or 'path_speed_wp'

@@ -1025,23 +1025,9 @@ class Visualizer:
     def _gt_speed_logits_clap(self):
         """Visualize ground truth speed logits given models predicted path."""
         speed_bins = self._get_speed_bins()
-        ttc_time_horizon = self.config.ttc_time_horizon # in seconds
         self.loss_speed = SpeedScoringLoss(
             speed_bins=speed_bins,
-            crt_cfg_dict={
-                "ttc_cfg":{
-                    "time_horizon": ttc_time_horizon,
-                    "coll_radius": 0.1,
-                    "safe_distance": 0.5
-                },
-                "traffic_rule_cfg":{
-                    "speed_thresh":0.1,
-                    "ss_stop_distance": 0.0
-                },
-                "overtake_cfg":{
-                    "ot_stop_distance": 20.0
-                }
-            },
+            crt_cfg_dict=self.config.speed_scoring_cfg_dict,
         )
         curr_speed = self.data.get("speed")[0]
         path_pred = self.predictions.pred_clapad["sdc_traj"]
