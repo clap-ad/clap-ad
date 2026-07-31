@@ -1,5 +1,10 @@
 from enum import IntEnum
 from typing import Any, Dict, List, Tuple
+import glob
+import math
+import os
+import pickle
+from collections import OrderedDict
 import cv2
 import numpy as np
 import numpy.typing as npt
@@ -26,6 +31,68 @@ from navsim.planning.simulation.planner.pdm_planner.utils.pdm_geometry_utils imp
 )
 from nuplan.planning.simulation.trajectory.trajectory_sampling import TrajectorySampling
 from py123d.geometry.transform.transform_se2 import convert_relative_to_absolute_se2_array
+
+
+# ---------------------------------------------------------------------------
+# Full-future GT path support.
+# The scene window only exposes ``num_future_frames`` future frames, which
+# truncates the path-head GT (``get_future_path``) to ~20 m and forces the path
+# loss to mask most of the 48-point prediction. We instead pull the FULL
+# remaining future straight from the raw OpenScene log (adjacent frames beyond
+# the window) so ``preprocess_path`` can fill the whole horizon without masking.
+# Logs are cached per name to avoid repeated disk reads during caching.
+# ---------------------------------------------------------------------------
+_RAW_LOG_FRAMES_CACHE: "OrderedDict[str, Any]" = OrderedDict()
+_RAW_LOG_CACHE_MAXSIZE = 8  # bound memory during full-split caching
+
+
+def _load_raw_log_frames(log_name: str):
+    """Load (and LRU-cache) the raw frame list for ``log_name`` from OpenScene logs."""
+    if log_name in _RAW_LOG_FRAMES_CACHE:
+        _RAW_LOG_FRAMES_CACHE.move_to_end(log_name)
+        return _RAW_LOG_FRAMES_CACHE[log_name]
+    frames = None
+    root = os.environ.get("OPENSCENE_DATA_ROOT")
+    if root:
+        matches = glob.glob(os.path.join(root, "navsim_logs", "*", f"{log_name}.pkl"))
+        if matches:
+            with open(matches[0], "rb") as handle:
+                frames = pickle.load(handle)
+    _RAW_LOG_FRAMES_CACHE[log_name] = frames
+    if len(_RAW_LOG_FRAMES_CACHE) > _RAW_LOG_CACHE_MAXSIZE:
+        _RAW_LOG_FRAMES_CACHE.popitem(last=False)
+    return frames
+
+
+def _yaw_from_quaternion(quat) -> float:
+    """Yaw (rad) from a [w, x, y, z] quaternion."""
+    w, x, y, z = quat
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def _full_future_global_poses(scene):
+    """Global SE2 poses (N, 3) for every frame after the current one, taken from
+    the raw log. Returns ``None`` if the log or current token cannot be resolved.
+    """
+    frames = _load_raw_log_frames(scene.scene_metadata.log_name)
+    if not frames:
+        return None
+    cur_token = scene.scene_metadata.initial_token
+    idx = next((k for k, f in enumerate(frames) if f["token"] == cur_token), None)
+    if idx is None or idx + 1 >= len(frames):
+        return None
+    future = frames[idx + 1:]
+    return np.array(
+        [
+            [
+                f["ego2global_translation"][0],
+                f["ego2global_translation"][1],
+                _yaw_from_quaternion(f["ego2global_rotation"]),
+            ]
+            for f in future
+        ],
+        dtype=np.float64,
+    )
 
 
 class TransfuserFeatureBuilder(AbstractFeatureBuilder):
@@ -150,6 +217,15 @@ class TransfuserTargetBuilder(AbstractTargetBuilder):
         agent_states, agent_labels = self._compute_agent_targets(annotations)
         bev_semantic_map = self._compute_bev_semantic_map(annotations, scene.map_api, ego_pose)
         path = torch.tensor(self.get_future_path(scene).poses)
+        # Precompute the 1 m-spaced GT route so training can use it directly,
+        # without re-fitting a spline on every __getitem__. The sampling params
+        # are frozen into the cache via TransfuserConfig.
+        from lead.data_loader.navsim_dataset import preprocess_path
+        route, route_mask = preprocess_path(
+            np.asarray(path),
+            sampling_distance=self._config.target_first_distance,
+            max_points=self._config.num_route_points_prediction,
+        )
         scene_info = get_scene_score_info_from_scene(scene)
 
         return {
@@ -158,7 +234,9 @@ class TransfuserTargetBuilder(AbstractTargetBuilder):
             "agent_labels": agent_labels,
             "bev_semantic_map": bev_semantic_map,
             "scene_info": scene_info,
-            "path": path
+            "path": path,
+            "route": torch.tensor(route),
+            "route_mask": torch.tensor(route_mask),
         }
 
     def _compute_agent_targets(self, annotations: Annotations) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -353,19 +431,27 @@ class TransfuserTargetBuilder(AbstractTargetBuilder):
     def get_future_path(self, scene):
         """
         Extracts the future path of the human operator until the end of the scenario.
-        Captures all future ego poses after the current frame.
+
+        Captures all future ego poses after the current frame. When the raw log is
+        available this uses the FULL remaining future (adjacent frames beyond the
+        loaded scene window) so the path-head GT can fill the whole prediction
+        horizon without masking; otherwise it falls back to the windowed scene
+        frames.
         """
         start_frame_idx = scene.scene_metadata.num_history_frames - 1
         start_ego_pose = scene.frames[start_frame_idx].ego_status.ego_pose
 
-        # Collect all future ego poses
-        future_poses = []
-        for frame_idx in range(start_frame_idx + 1, len(scene.frames)):
-            pose = scene.frames[frame_idx].ego_status.ego_pose
-            future_poses.append(pose)
+        # Full remaining future from the raw log (preferred), else the window.
+        future_poses = _full_future_global_poses(scene)
+        if future_poses is None:
+            future_poses = np.array(
+                [
+                    scene.frames[frame_idx].ego_status.ego_pose
+                    for frame_idx in range(start_frame_idx + 1, len(scene.frames))
+                ],
+                dtype=np.float64,
+            )
 
-
-        future_poses = np.array(future_poses, dtype=np.float64)
         local_poses = convert_absolute_to_relative_se2_array(
             StateSE2(*start_ego_pose), future_poses
         )

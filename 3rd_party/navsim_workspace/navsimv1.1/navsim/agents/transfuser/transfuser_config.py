@@ -19,6 +19,12 @@ class TransfuserConfig:
     latent: bool = False
     latent_rad_thresh: float = 4 * np.pi / 9
 
+    # Path-head GT route (CLAP-AD): the 1 m-spaced route is precomputed at cache
+    # time and stored directly, so training uses it as GT without re-sampling.
+    # These freeze the route length/spacing into the cache; change -> re-cache.
+    num_route_points_prediction: int = 48   # route length in points
+    target_first_distance: float = 1.0      # route point spacing [m]
+
     max_height_lidar: float = 100.0
     pixels_per_meter: float = 4.0
     hist_max_per_pixel: int = 5

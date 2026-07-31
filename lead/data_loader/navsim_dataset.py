@@ -154,17 +154,34 @@ class NavsimData(Dataset):
         bev_semantic_map = cv2.imencode(".png", bev_semantic_map)[1]
         
         # for clap-ad
-        path = target.get("path", None)
-        if path is None:
-            path = np.zeros((10, 3)) # Dummy path of 10 points with (x,y,yaw)
-            path_mask = np.zeros(10, dtype=bool) # All points are invalid
+        cached_route = target.get("route", None)
+        cached_route_mask = target.get("route_mask", None)
+        if cached_route is not None and cached_route_mask is not None:
+            # Precomputed 1 m-spaced GT route from the cache (CARLA frame). Used
+            # directly as GT -- no per-sample spline fitting.
+            path = np.asarray(
+                cached_route.numpy() if isinstance(cached_route, torch.Tensor)
+                else cached_route,
+                dtype=np.float32,
+            )
+            path_mask = np.asarray(
+                cached_route_mask.numpy() if isinstance(cached_route_mask, torch.Tensor)
+                else cached_route_mask,
+                dtype=bool,
+            )
         else:
-            path = target["path"] # List of (x, y, yaw) tuples representing the path
-            if isinstance(path, torch.Tensor):
-                path = path
+            # Fallback (older caches): sample the route from the raw path on load.
+            path = target.get("path", None)
+            if path is None:
+                path = np.zeros((10, 3)) # Dummy path of 10 points with (x,y,yaw)
+                path_mask = np.zeros(10, dtype=bool) # All points are invalid
             else:
-                path = path.poses
-            path, path_mask = preprocess_path(path, sampling_distance=self.config.target_first_distance, max_points=self.config.num_route_points_prediction)
+                path = target["path"] # List of (x, y, yaw) tuples representing the path
+                if isinstance(path, torch.Tensor):
+                    path = path
+                else:
+                    path = path.poses
+                path, path_mask = preprocess_path(path, sampling_distance=self.config.target_first_distance, max_points=self.config.num_route_points_prediction)
         
         scene_info = target.get("scene_info", None)
         if scene_info is None:
@@ -329,51 +346,35 @@ def preprocess_path(path, sampling_distance=1.0, max_points=24):
             mask[0] = True
         return sampled_path, mask
 
-    # Handle paths with duplicate points which can cause spline fitting to fail
-    # _, unique_indices = np.unique(path[:, 0], return_index=True)
-    _, unique_indices = np.unique(path, axis=0, return_index=True)
-    path = path[unique_indices]
-    if len(path) < 2:
-        sampled_path = np.zeros((max_points, 2))
-        mask = np.zeros(max_points, dtype=bool)
-        if len(path) == 1:
-            sampled_path[0] = path[0]
-            mask[0] = True
-        return sampled_path, mask
+    # Remove *consecutive* duplicate points while preserving trajectory order.
+    # (Note: np.unique sorts by value and would scramble the path order.)
+    path = np.asarray(path, dtype=np.float64)
+    keep = np.concatenate(([True], np.any(np.abs(np.diff(path, axis=0)) > 1e-6, axis=1)))
+    path = path[keep]
+    if len(path) < 1:
+        return (
+            np.zeros((max_points, 2), dtype=np.float32),
+            np.zeros(max_points, dtype=bool),
+        )
 
-    # if path[0] > sampling_distance from origin, extrapolate points at the beginning until the first point is within sampling_distance from origin.
-    # Ensure path stays ahead (x >= 0), do not extrapolate to negative x (backwards)
-    if np.linalg.norm(path[0]) > sampling_distance:
-        direction = path[0] / np.linalg.norm(path[0])
-        num_extrapolated_points = int(np.ceil(np.linalg.norm(path[0]) / sampling_distance))
-        extrapolated_points = []
-        for i in range(num_extrapolated_points, 0, -1):
-            new_point = path[0] - direction * sampling_distance * i
-            if new_point[0] < 0:
-                continue  # Skip points that would go behind (negative x)
-            extrapolated_points.append(new_point)
-        if extrapolated_points:
-            path = np.vstack((np.array(extrapolated_points), path))
-    
-    # Fit spline
-    k = min(3, len(path) - 1)
-    tck, _ = splprep([path[:, 0], path[:, 1]], s=1, k=k)
-    # Dense spline sampling
-    u_dense = np.linspace(0, 1, 2000)
-    x_dense, y_dense = splev(u_dense, tck)
-    dense_path = np.stack([x_dense, y_dense], axis=1)
-    # sampling
-    sampled = []
-    reference_point = np.array([0.0, 0.0])
-    for p in dense_path:
-        dist = np.linalg.norm(p - reference_point)
-        if dist >= sampling_distance:
-            sampled.append(p)
-            reference_point = p
-        if len(sampled) >= max_points:
-            break
+    # Resample the raw polyline at exact ``sampling_distance`` arc-length
+    # intervals, anchored at the ego origin (0, 0). Linear interpolation on the
+    # actual driven trajectory (no spline): robust to slow / stopped / turning
+    # motion, follows the real path, and gives uniform ~1 m spacing without the
+    # spline oscillation artefacts that could send the route backwards.
+    poly = np.vstack(([0.0, 0.0], path[:, :2]))
+    seg = np.linalg.norm(np.diff(poly, axis=0), axis=1)
+    arclen = np.concatenate(([0.0], np.cumsum(seg)))
+    target = sampling_distance * np.arange(1, max_points + 1)
+    target = target[target <= arclen[-1]]
+    sampled = np.stack(
+        [
+            np.interp(target, arclen, poly[:, 0]),
+            np.interp(target, arclen, poly[:, 1]),
+        ],
+        axis=1,
+    ).astype(np.float32)
 
-    sampled = np.array(sampled, dtype=np.float32)
     sampled_path = np.zeros((max_points, 2), dtype=np.float32)
     mask = np.zeros(max_points, dtype=bool)
     num_valid = min(len(sampled), max_points)
