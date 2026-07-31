@@ -60,7 +60,9 @@ class PlanningHeadClap(nn.Module):
             )
         )
         self.dimension_adapter = nn.Conv2d(
-            512, self.config.transfuser_token_dim, kernel_size=1
+            kwargs["input_bev_channels"],
+            self.config.transfuser_token_dim,
+            kernel_size=1,
         )
         self.transformer_decoder = torch.nn.TransformerDecoder(
             decoder_layer=nn.TransformerDecoderLayer(

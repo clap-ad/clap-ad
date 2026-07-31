@@ -74,6 +74,12 @@ def initialize_training_session_cache(config: TrainingConfig) -> Cache | None:
 
 @beartype
 def initialize_torch(config: TrainingConfig) -> int:
+    # Bind this process to its own GPU *before* any CUDA work (seeding, NCCL
+    # init, tensor allocation). Otherwise every rank touches the default device
+    # cuda:0 and leaves a dangling CUDA context there.
+    if torch.cuda.is_available():
+        torch.cuda.set_device(config.local_rank)
+
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
     random.seed(config.seed)
@@ -93,7 +99,6 @@ def initialize_torch(config: TrainingConfig) -> int:
             timeout=datetime.timedelta(minutes=120),
         )
 
-    torch.cuda.device(config.device)
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.deterministic = False
