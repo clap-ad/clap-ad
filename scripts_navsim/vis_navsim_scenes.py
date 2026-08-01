@@ -47,10 +47,17 @@ from navsim.visualization.bev import (
 )
 from navsim.visualization.config import TRAJECTORY_CONFIG
 
-DEFAULT_CKPT = (
+V4_CKPT = (
     "/data/datasets/AD_datasets/Bench2Drive-ckpts/thomas/clapad/navsim/"
     "TestByeaghajanzadeh_20260506_155115_v4/model_0060.pth"
 )
+
+V5_CKPT = (
+    "/data/datasets/AD_datasets/Bench2Drive-ckpts/thomas/clapad/navsim/"
+    "TestByeaghajanzadeh_20260722_084623/model_0060.pth"
+)
+
+DEFAULT_CKPT = V5_CKPT
 
 # token -> label. Mix of failure buckets (from the navtest CSV) and clean scenes.
 DEFAULT_TOKENS = {
@@ -65,23 +72,34 @@ DEFAULT_TOKENS = {
 }
 
 
-def _apply_v4_arch_defaults() -> None:
-    """Align the model architecture with the v4 checkpoint.
+def _apply_legacy_clapad_defaults(checkpoint: str) -> None:
+    """Apply compatibility defaults only for missing checkpoint config keys.
 
-    The v4 checkpoint predates two changes and its config.json stores neither
-    key, so we restore the checkpoint-era defaults on the config class:
-      * ``path_head_hidden_dim_multipliers = [2, 1]`` -> the Sequential path head
-        ``Linear(D,2D)->ReLU->Linear(2D,D)->ReLU->Linear(D,2)``.
-      * 7-bin ``speed_bins`` (kept as a tensor; ``traj_from_clapad`` calls
-        ``.clamp`` on the selected bin).
+    Some older checkpoints do not persist all training config fields in
+    ``config.json``. We only backfill missing fields:
+      * ``path_head_hidden_dim_multipliers`` -> ``[2, 1]``
+      * ``speed_bins`` -> 7-bin NAVSIM paper bins.
+
+    If a key exists in ``config.json``, its explicit value is kept.
     """
+    import json
     import torch
     from lead.training.config_training import TrainingConfig as CarlaTrainingConfig
 
-    CarlaTrainingConfig.path_head_hidden_dim_multipliers = [2, 1]
-    CarlaTrainingConfig.speed_bins = torch.tensor(
-        [0.0, 2.5, 5.0, 7.0, 8.5, 10.0, 12.0]
-    )
+    ckpt_dir = checkpoint if os.path.isdir(checkpoint) else os.path.dirname(checkpoint)
+    cfg_path = os.path.join(ckpt_dir, "config.json")
+    cfg = {}
+    if os.path.exists(cfg_path):
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+
+    if "path_head_hidden_dim_multipliers" not in cfg:
+        CarlaTrainingConfig.path_head_hidden_dim_multipliers = [2, 1]
+
+    if "speed_bins" not in cfg:
+        CarlaTrainingConfig.speed_bins = torch.tensor(
+            [0.0, 2.5, 5.0, 7.0, 8.5, 10.0, 12.0]
+        )
 
 
 def build_agent(kind: str, checkpoint: str) -> AbstractAgent:
@@ -91,7 +109,7 @@ def build_agent(kind: str, checkpoint: str) -> AbstractAgent:
     elif kind == "clapad":
         if os.path.isdir(checkpoint):
             checkpoint = os.path.join(checkpoint, "model_0060.pth")
-        _apply_v4_arch_defaults()
+        _apply_legacy_clapad_defaults(checkpoint)
         agent = CarlaTransfuserAgent(
             config=TransfuserConfig(), checkpoint_path=checkpoint
         )
@@ -281,10 +299,14 @@ def draw_bev_on_ax(ax, scene, agent) -> None:
 def extract_gt_route(agent, scene, future_local=None):
     """Reproduce the path-head GT (``data['route']``) for plotting.
 
-    Mirrors the navsim dataloader: run ``preprocess_path`` with the model's own
-    ``target_first_distance`` (1 m spacing) and ``num_route_points_prediction``.
-    ``preprocess_path`` returns the CARLA frame (y flipped); we negate y back to
-    the navsim frame so it overlays consistently with the other trajectories.
+    Mirrors the navsim dataloader/cache builder: run ``preprocess_path`` at a
+    fixed 1 m spacing from the ego origin, with ``num_route_points_prediction``
+    points. NAVSIM always uses this fixed 1 m spacing -- NOT
+    ``config.target_first_distance`` (that field is CARLA-leaderboard-scoped,
+    e.g. 2.5 m, and unrelated to the NAVSIM route head; using it here would
+    silently mismatch the actual cached training GT). ``preprocess_path``
+    returns the CARLA frame (y flipped); we negate y back to the navsim frame
+    so it overlays consistently with the other trajectories.
 
     ``future_local`` optionally supplies a longer future ego path (N, 2) pulled
     straight from the raw log (see ``build_full_future_paths``); without it we
@@ -299,7 +321,7 @@ def extract_gt_route(agent, scene, future_local=None):
         raw = future_local  # (N, 2) full remaining log future
     route, mask = preprocess_path(
         raw,
-        sampling_distance=cfg.target_first_distance,
+        sampling_distance=1.0,
         max_points=cfg.num_route_points_prediction,
     )
     route = route[mask].copy()          # (M, 2), CARLA frame
@@ -330,7 +352,7 @@ def extract_gt_route_windowed(agent, scene):
     local = convert_absolute_to_relative_se2_array(StateSE2(*start), fut)
     route, mask = preprocess_path(
         local,
-        sampling_distance=cfg.target_first_distance,
+        sampling_distance=1.0,
         max_points=cfg.num_route_points_prediction,
     )
     route = route[mask].copy()
@@ -500,13 +522,28 @@ def main() -> None:
             gt_route = extract_gt_route(agent, scene, full_future.get(token))
             fig, ax = plt.subplots(figsize=(6, 9))
             r = np.concatenate([[[0.0, 0.0]], gt_route])
-            ax.plot(r[:, 1], r[:, 0], color=GT_PATH_COLOR, ls="-", marker="x",
-                    markersize=5, label=f"GT new ({len(gt_route)}/{n_pts})")
+            ds = 1.0  # NAVSIM GT route is always sampled at a fixed 1 m spacing
+            ax.plot(
+                r[:, 1],
+                r[:, 0],
+                color=GT_PATH_COLOR,
+                ls="-",
+                marker="x",
+                markersize=5,
+                label=f"GT new ({len(gt_route)}/{n_pts}, ds={ds:g}m)",
+            )
             if args.compare_gt:
                 old_route = extract_gt_route_windowed(agent, scene)
                 o = np.concatenate([[[0.0, 0.0]], old_route])
-                ax.plot(o[:, 1], o[:, 0], color=OLD_GT_COLOR, ls=":", marker="+",
-                        markersize=7, label=f"GT old ({len(old_route)}/{n_pts})")
+                ax.plot(
+                    o[:, 1],
+                    o[:, 0],
+                    color=OLD_GT_COLOR,
+                    ls=":",
+                    marker="+",
+                    markersize=7,
+                    label=f"GT old ({len(old_route)}/{n_pts}, ds={ds:g}m)",
+                )
             ax.plot(0, 0, marker="s", color="black", markersize=8, label="ego")
             ax.set_aspect("equal")
             ax.grid(True, alpha=0.3)
@@ -549,8 +586,9 @@ def main() -> None:
             current_speed, target_speed, pred_scores, gt_scores, speed_bins, pred_path = (
                 clapad_prediction(agent, scene)
             )
-            # Extracted GT path = the 1 m-spaced path-head target (data["route"]),
-            # sourced from the full raw-log future so it fills the whole horizon.
+            # Extracted GT path = the path-head target (data["route"]) sampled at
+            # a fixed 1 m spacing from the ego origin, sourced from the full
+            # raw-log future so it fills the whole horizon.
             gt_route = extract_gt_route(agent, scene, full_future.get(token))
             gt_path = np.concatenate([[[0.0, 0.0]], gt_route])
             ax.plot(gt_path[:, 1], gt_path[:, 0], color=GT_PATH_COLOR, lw=1.5,
@@ -570,14 +608,16 @@ def main() -> None:
             legend_handles.append(
                 Line2D([0], [0], color=GT_PATH_COLOR, lw=1.5, marker="x",
                        label=f"GT path new ({len(gt_route)}/"
-                             f"{agent._carla_model_config.num_route_points_prediction})"),
+                             f"{agent._carla_model_config.num_route_points_prediction}, "
+                             f"ds=1m)"),
             )
             if args.compare_gt:
                 legend_handles.append(
                     Line2D([0], [0], color=OLD_GT_COLOR, lw=1.5, ls=":",
                            marker="+",
                            label=f"GT path old ({len(old_route)}/"
-                                 f"{agent._carla_model_config.num_route_points_prediction})"),
+                                 f"{agent._carla_model_config.num_route_points_prediction}, "
+                                 f"ds=1m)"),
                 )
             legend_handles.append(
                 Line2D([0], [0], color=PRED_PATH_COLOR, lw=1.5, marker="x",

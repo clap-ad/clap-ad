@@ -181,7 +181,10 @@ class NavsimData(Dataset):
                     path = path
                 else:
                     path = path.poses
-                path, path_mask = preprocess_path(path, sampling_distance=self.config.target_first_distance, max_points=self.config.num_route_points_prediction)
+                # NAVSIM always uses a fixed 1 m route spacing from the ego
+                # origin -- NOT ``self.config.target_first_distance`` (that
+                # field is CARLA-leaderboard-scoped, e.g. 2.5 m).
+                path, path_mask = preprocess_path(path, sampling_distance=1.0, max_points=self.config.num_route_points_prediction)
         
         scene_info = target.get("scene_info", None)
         if scene_info is None:

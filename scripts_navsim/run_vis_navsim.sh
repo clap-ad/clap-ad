@@ -21,7 +21,7 @@ PROJECT_DIR=/workspace/lead
 NAVSIM_ROOT="${PROJECT_DIR}/3rd_party/navsim_workspace"
 DEVKIT="${NAVSIM_ROOT}/navsimv1.1"
 VENV_PY="${DEVKIT}/venv/bin/python"
-SCRIPT="${PROJECT_DIR}/scripts_clapad/vis_navsim_scenes.py"
+SCRIPT="${PROJECT_DIR}/scripts_navsim/vis_navsim_scenes.py"
 
 # --- Environment (mirrors scripts/evaluation/run_clap.sh) -------------------
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"

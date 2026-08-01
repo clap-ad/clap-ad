@@ -218,12 +218,14 @@ class TransfuserTargetBuilder(AbstractTargetBuilder):
         bev_semantic_map = self._compute_bev_semantic_map(annotations, scene.map_api, ego_pose)
         path = torch.tensor(self.get_future_path(scene).poses)
         # Precompute the 1 m-spaced GT route so training can use it directly,
-        # without re-fitting a spline on every __getitem__. The sampling params
-        # are frozen into the cache via TransfuserConfig.
+        # without re-fitting a spline on every __getitem__. NAVSIM always uses a
+        # fixed 1 m spacing, starting from the ego origin -- NOT
+        # ``config.target_first_distance`` (that field is CARLA-leaderboard-
+        # scoped and unrelated to the NAVSIM route head).
         from lead.data_loader.navsim_dataset import preprocess_path
         route, route_mask = preprocess_path(
             np.asarray(path),
-            sampling_distance=self._config.target_first_distance,
+            sampling_distance=1.0,
             max_points=self._config.num_route_points_prediction,
         )
         scene_info = get_scene_score_info_from_scene(scene)
