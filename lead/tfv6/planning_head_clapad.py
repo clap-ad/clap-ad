@@ -148,6 +148,54 @@ class PlanningHeadClap(nn.Module):
         # the predicted route to a straight line. Matches PlanningDecoder.
         nn.init.uniform_(self.path_query)
 
+        # Optional fixed sinusoidal positional encoding added to the path_query
+        # slots before the transformer decoder. Off by default for backward
+        # compatibility with checkpoints trained without this signal; the
+        # learned ``path_query`` parameter above is not sufficient on its own
+        # to prevent per-position representation collapse in the stacked
+        # self-/cross-attention decoder (route predictions can degenerate into
+        # near-identical offsets at every step, i.e. a straight line).
+        self.use_path_query_pos_embed = bool(
+            getattr(self.config, "use_clapad_path_query_positional_encoding", False)
+        )
+        if self.use_path_query_pos_embed:
+            self.register_buffer(
+                "path_query_pos_embed",
+                self._build_sinusoidal_position_encoding(
+                    self.planning_steps, self.config.transfuser_token_dim,
+                ),
+                persistent=False,
+            )
+        else:
+            self.path_query_pos_embed = None
+
+    @staticmethod
+    def _build_sinusoidal_position_encoding(num_positions: int, dim: int) -> torch.Tensor:
+        """Standard (Vaswani et al.) fixed 1D sinusoidal positional encoding.
+
+        Returns a non-learned tensor of shape ``[1, num_positions, dim]`` that
+        can be added to the ``path_query`` slots so each of the
+        ``num_route_points_prediction`` route positions carries an explicit,
+        unambiguous positional signal into the transformer decoder, on top of
+        the learned ``path_query`` parameter.
+        """
+        position = torch.arange(num_positions, dtype=torch.float32).unsqueeze(1)  # [T, 1]
+        div_term = torch.exp(
+            torch.arange(0, dim, 2, dtype=torch.float32) * (-np.log(10000.0) / dim)
+        )  # [ceil(dim/2)]
+        pe = torch.zeros(num_positions, dim)
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term[: pe[:, 1::2].shape[1]])
+        return pe.unsqueeze(0)  # [1, T, dim]
+
+    def _path_query_tgt(self, batch_size: int) -> torch.Tensor:
+        """Return the (batched) path_query input to the transformer decoder,
+        optionally with the fixed sinusoidal positional encoding added."""
+        tgt = self.path_query.repeat(batch_size, 1, 1)
+        if self.path_query_pos_embed is not None:
+            tgt = tgt + self.path_query_pos_embed.to(dtype=tgt.dtype)
+        return tgt
+
     def _build_path_head(self, embed_dims):
         """Build the path prediction head.
 
@@ -329,7 +377,7 @@ class PlanningHeadClap(nn.Module):
             plan_nav_query = torch.cat([plan_query, navi_embed], dim=1) # [B, (1+1+1+1) + H * W, transfuser_token_dim]
 
             B = plan_nav_query.shape[0]  # Batch size
-            path_query = self.transformer_decoder(self.path_query.repeat(B, 1, 1), plan_nav_query) # [B, T, transfuser_token_dim]
+            path_query = self.transformer_decoder(self._path_query_tgt(B), plan_nav_query) # [B, T, transfuser_token_dim]
         else:
             self.kv = context_tokens = self.planning_context_encoder(
                 bev_features=self.dimension_adapter(bev_embed),
@@ -339,7 +387,7 @@ class PlanningHeadClap(nn.Module):
                 log=kwargs.get("log", {})
             )
             bs = context_tokens.shape[0]
-            path_query = self.transformer_decoder(self.path_query.repeat(bs, 1, 1), context_tokens)
+            path_query = self.transformer_decoder(self._path_query_tgt(bs), context_tokens)
             plan_query = context_tokens
 
         path_pred = self.path_fc(path_query) # [B, T, 2]
