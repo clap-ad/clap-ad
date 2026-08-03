@@ -691,11 +691,11 @@ class TrainingConfig(BaseConfig):
     # layer (nn.Linear(embed_dims, 2)), which is the current default
     path_head_hidden_dim_multipliers = []
 
-    # If true, add a fixed (non-learned) sinusoidal positional encoding to the
-    # CLAP-AD path_query slots before the transformer decoder, reinforcing
-    # per-timestep identity across the stacked self-/cross-attention layers.
-    # Default False for backward compatibility with existing checkpoints
-    # (which were trained without this signal).
+    # If true, add a learned per-position embedding to the CLAP-AD path_query
+    # slots before the transformer decoder, reinforcing per-timestep identity
+    # across the stacked self-/cross-attention layers. Default False for
+    # backward compatibility with existing checkpoints (which were trained
+    # without this signal).
     use_clapad_path_query_positional_encoding = False
 
     # Used for TFv5 planning decoder

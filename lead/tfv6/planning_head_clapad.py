@@ -143,82 +143,49 @@ class PlanningHeadClap(nn.Module):
             )
             self.navi_embed = nn.Embedding(command_dim, embed_dims)
 
-        # Break query symmetry: with zero-initialized queries and no positional
-        # encoding on the path query, all route slots are identical, collapsing
-        # the predicted route to a straight line. Matches PlanningDecoder.
-        nn.init.uniform_(self.path_query)
+        # path_query always uses the v4 recipe: no explicit init call, i.e. it
+        # stays at its nn.Parameter(torch.zeros(...)) default above. This is
+        # the only recipe that has never shown the per-position query collapse
+        # described below (every checkpoint trained with
+        # nn.init.uniform_(self.path_query) instead -- introduced 2026-06-22
+        # alongside switching path_fc to a single Linear layer -- has shown the
+        # 48 path_query slots collapsing to near-identical post-decoder
+        # embeddings, cosine similarity ~1.0, producing a near-straight path
+        # regardless of route curvature).
 
-        # Optional fixed sinusoidal positional encoding added to the path_query
+        # Optional learned per-position embedding added to the path_query
         # slots before the transformer decoder. Off by default for backward
         # compatibility with checkpoints trained without this signal; the
-        # learned ``path_query`` parameter above is not sufficient on its own
-        # to prevent per-position representation collapse in the stacked
-        # self-/cross-attention decoder (route predictions can degenerate into
-        # near-identical offsets at every step, i.e. a straight line).
+        # zero-initialized ``path_query`` parameter above is otherwise
+        # perfectly symmetric across the 48 positions, relying solely on
+        # dropout noise inside the decoder to break symmetry during training.
+        # Zero-initialized just like ``path_query`` -- purely learned from
+        # scratch during training, no hand-designed prior.
         self.use_path_query_pos_embed = bool(
             getattr(self.config, "use_clapad_path_query_positional_encoding", False)
         )
         if self.use_path_query_pos_embed:
-            self.register_buffer(
-                "path_query_pos_embed",
-                self._build_sinusoidal_position_encoding(
-                    self.planning_steps, self.config.transfuser_token_dim,
-                ),
-                persistent=False,
+            self.path_query_pos_embed = nn.Parameter(
+                torch.zeros(1, self.planning_steps, self.config.transfuser_token_dim)
             )
         else:
             self.path_query_pos_embed = None
 
-    @staticmethod
-    def _build_sinusoidal_position_encoding(num_positions: int, dim: int) -> torch.Tensor:
-        """Standard (Vaswani et al.) fixed 1D sinusoidal positional encoding.
-
-        Returns a non-learned tensor of shape ``[1, num_positions, dim]`` that
-        can be added to the ``path_query`` slots so each of the
-        ``num_route_points_prediction`` route positions carries an explicit,
-        unambiguous positional signal into the transformer decoder, on top of
-        the learned ``path_query`` parameter.
-        """
-        position = torch.arange(num_positions, dtype=torch.float32).unsqueeze(1)  # [T, 1]
-        div_term = torch.exp(
-            torch.arange(0, dim, 2, dtype=torch.float32) * (-np.log(10000.0) / dim)
-        )  # [ceil(dim/2)]
-        pe = torch.zeros(num_positions, dim)
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term[: pe[:, 1::2].shape[1]])
-        return pe.unsqueeze(0)  # [1, T, dim]
-
     def _path_query_tgt(self, batch_size: int) -> torch.Tensor:
         """Return the (batched) path_query input to the transformer decoder,
-        optionally with the fixed sinusoidal positional encoding added."""
+        optionally with the learned per-position embedding added."""
         tgt = self.path_query.repeat(batch_size, 1, 1)
         if self.path_query_pos_embed is not None:
             tgt = tgt + self.path_query_pos_embed.to(dtype=tgt.dtype)
         return tgt
 
     def _build_path_head(self, embed_dims):
-        """Build the path prediction head.
-
-        Uses ``config.path_head_hidden_dim_multipliers`` to decide the
-        architecture. An empty list yields a single ``nn.Linear(embed_dims, 2)``.
-        A non-empty list of multipliers ``m`` yields an MLP with hidden layers of
-        size ``int(embed_dims * m)`` separated by ReLU activations, e.g. ``[2, 1]``
-        reproduces the v5 head
-        ``Linear(D, 2D) -> ReLU -> Linear(2D, D) -> ReLU -> Linear(D, 2)``.
-        """
-        multipliers = self.config.path_head_hidden_dim_multipliers
-        if not multipliers:
-            return nn.Linear(embed_dims, 2)
-
-        layers = []
-        in_dim = embed_dims
-        for multiplier in multipliers:
-            hidden_dim = int(embed_dims * multiplier)
-            layers.append(nn.Linear(in_dim, hidden_dim))
-            layers.append(nn.ReLU())
-            in_dim = hidden_dim
-        layers.append(nn.Linear(in_dim, 2))
-        return nn.Sequential(*layers)
+        """Build the path prediction head: ``Linear(D,D) -> GELU -> Linear(D,2)``."""
+        return nn.Sequential(
+            nn.Linear(embed_dims, embed_dims),
+            nn.GELU(),
+            nn.Linear(embed_dims, 2),
+        )
 
     def forward_train(self,
                       bev_embed, 
