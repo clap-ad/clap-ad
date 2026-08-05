@@ -53,6 +53,13 @@ def initialize_config() -> TrainingConfig:
             os.path.join("/".join(config.load_file.split("/")[:-1]), "config.json"),
         ) as f:
             loaded_config = json.load(f)
+        # experiment_name/logdir/id are per-run identifiers that were saved as part of
+        # the stage-1 (loaded_file) run's own config.json. They must NOT be inherited
+        # here -- each new training run (e.g. stage 2 posttraining) needs its own fresh
+        # timestamped identifiers, otherwise it silently reuses (and overwrites) the
+        # stage-1 run's ClearML project/task and checkpoint output directory.
+        for stale_key in ("user_name", "experiment_name", "logdir", "id"):
+            loaded_config.pop(stale_key, None)
         config = TrainingConfig(loaded_config, raise_error_on_missing_key=False)
     return config
 
