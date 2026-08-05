@@ -697,6 +697,9 @@ class TrainingConfig(BaseConfig):
     # backward compatibility with existing checkpoints (which were trained
     # without this signal).
     use_clapad_path_query_positional_encoding = False
+    
+    # Flag for the 1-query path decoder
+    use_arc_length_decoder = False
 
     # Used for TFv5 planning decoder
     gru_hidden_size = 64

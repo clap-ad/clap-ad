@@ -1,14 +1,72 @@
-
-
 from lead.tfv6.speed_score_utils import compute_overtake_adherence, compute_stop_sign_adherence, compute_traffic_light_adherence, compute_ttc
 from lead.tfv6.planning_decoder import PlanningContextEncoder, PositionEmbeddingSine
 from lead.tfv6.hydra_speed_head import HydraSpeedHead
-import torch
-import torch.nn as nn
 import numpy as np
 import torch.nn.functional as F
 import torch
 import torch.nn as nn
+import math
+
+class ArcLengthPositionalEncoding(nn.Module):
+    """Sinusoidal PE over a continuous scalar (arc-length), 
+    analogous to Transformer PE but indexed by a real-valued position."""
+    def __init__(self, dim: int, max_len: float = 48.0):
+        super().__init__()
+        assert dim % 2 == 0
+        self.dim = dim
+        self.max_len = max_len
+        # precompute frequency bands
+        freq = torch.exp(
+            torch.arange(0, dim, 2).float() * (-math.log(10000.0) / dim)
+        )
+        self.register_buffer("freq", freq)  # [dim/2]
+
+    def forward(self, s: torch.Tensor) -> torch.Tensor:
+        """
+        s: [..., ] arbitrary shape of arc-length positions (e.g. [48] or [B, 48])
+        returns: [..., dim]
+        """
+        s = s.unsqueeze(-1)  # [..., 1]
+        angles = s * self.freq  # [..., dim/2]
+        pe = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)  # [..., dim]
+        return pe
+
+
+class ArcLengthDecoder(nn.Module):
+    def __init__(self, latent_dim: int = 256, pe_dim: int = 128, hidden: int = 256, n_points: int = 48):
+        super().__init__()
+        self.n_points = n_points
+        self.pe = ArcLengthPositionalEncoding(pe_dim, max_len=float(n_points))
+        self.mlp = nn.Sequential(
+            nn.Linear(latent_dim + pe_dim, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, 2),  # (dx, dy)
+        )
+
+    def forward(self, scene_latent: torch.Tensor) -> torch.Tensor:
+        """
+        scene_latent: [B, D]
+        returns: [B, n_points, 2] absolute (x, y) path after cumsum
+        """
+        B = scene_latent.shape[0]
+        device = scene_latent.device
+
+        # arc-length positions, e.g. 1..48 (or normalize to [0,1] — see note below)
+        s = torch.arange(1, self.n_points + 1, device=device).float()  # [48]
+        pe = self.pe(s)  # [48, pe_dim]
+        pe = pe.unsqueeze(0).expand(B, -1, -1)  # [B, 48, pe_dim]
+
+        latent_expanded = scene_latent.unsqueeze(1).expand(-1, self.n_points, -1)  # [B, 48, D]
+
+        decoder_input = torch.cat([latent_expanded, pe], dim=-1)  # [B, 48, D + pe_dim]
+        offsets = self.mlp(decoder_input)  # [B, 48, 2]
+
+        path = torch.cumsum(offsets, dim=1)  # [B, 48, 2] absolute path
+        return path, offsets
 
 class PlanningHeadClap(nn.Module):
     def __init__(
@@ -52,18 +110,13 @@ class PlanningHeadClap(nn.Module):
             dtype=self.config.torch_float_type,
         )
         self.planning_steps = self.config.num_route_points_prediction # since we predict 12 waypoints in future
-        self.path_query = nn.Parameter(
-            torch.zeros(
-                1,
-                self.planning_steps,
-                self.config.transfuser_token_dim,
-            )
-        )
+
         self.dimension_adapter = nn.Conv2d(
             kwargs["input_bev_channels"],
             self.config.transfuser_token_dim,
             kernel_size=1,
         )
+
         self.transformer_decoder = torch.nn.TransformerDecoder(
             decoder_layer=nn.TransformerDecoderLayer(
                 self.config.transfuser_token_dim,
@@ -74,8 +127,41 @@ class PlanningHeadClap(nn.Module):
             num_layers=self.config.transfuser_num_bev_cross_attention_layers,
             norm=nn.LayerNorm(self.config.transfuser_token_dim),
         )
-        # Single linear head, matching PlanningDecoder.route_decoder.
-        self.path_fc = self._build_path_head(embed_dims)
+        
+        # self.transformer_decoder = nn.MultiheadAttention(
+        #     embed_dim=self.config.transfuser_token_dim,
+        #     num_heads=self.config.transfuser_num_bev_cross_attention_heads,
+        #     batch_first=True
+        # )
+
+        if self.config.use_arc_length_decoder:
+            # uses single query and positional encoding to produce path
+            self.path_query = nn.Parameter(
+                torch.randn(
+                    1,
+                    1,
+                    self.config.transfuser_token_dim,
+                ) * 0.02
+            )
+            self.arc_length_decoder = ArcLengthDecoder(
+                latent_dim=self.config.transfuser_token_dim,
+                pe_dim=self.config.transfuser_token_dim // 4,
+                hidden=self.config.transfuser_token_dim,
+                n_points=self.planning_steps,
+            )
+
+        else:
+            # uses multiple queries (one per path point) to produce path
+            self.path_query = nn.Parameter(
+                torch.zeros(
+                    1,
+                    self.planning_steps,
+                    self.config.transfuser_token_dim,
+                )
+            )
+            # Single linear head, matching PlanningDecoder.route_decoder.
+            self.path_fc = self._build_path_head(embed_dims)
+
         num_modes = 4 # TTC - TF-light - Stop sign - Overtake
         assert num_modes > 1
         # use same speed head for time-to-collision (TTC) and traffic light (TL) branches
@@ -181,11 +267,24 @@ class PlanningHeadClap(nn.Module):
 
     def _build_path_head(self, embed_dims):
         """Build the path prediction head: ``Linear(D,D) -> GELU -> Linear(D,2)``."""
-        return nn.Sequential(
-            nn.Linear(embed_dims, embed_dims),
-            nn.GELU(),
-            nn.Linear(embed_dims, 2),
-        )
+        multipliers = self.config.path_head_hidden_dim_multipliers
+        if not multipliers:
+            # default
+            return nn.Sequential(
+                nn.Linear(embed_dims, embed_dims),
+                nn.GELU(),
+                nn.Linear(embed_dims, 2),
+            )
+
+        layers = []
+        in_dim = embed_dims
+        for multiplier in multipliers:
+            hidden_dim = int(embed_dims * multiplier)
+            layers.append(nn.Linear(in_dim, hidden_dim))
+            layers.append(nn.ReLU())
+            in_dim = hidden_dim
+        layers.append(nn.Linear(in_dim, 2))
+        return nn.Sequential(*layers)
 
     def forward_train(self,
                       bev_embed, 
@@ -354,11 +453,24 @@ class PlanningHeadClap(nn.Module):
                 log=kwargs.get("log", {})
             )
             bs = context_tokens.shape[0]
-            path_query = self.transformer_decoder(self._path_query_tgt(bs), context_tokens)
             plan_query = context_tokens
+            
+            if self.config.use_arc_length_decoder:
+                path_query = self.path_query.repeat(bs, 1, 1) # [B, transfuser_token_dim]
+            else:
+                path_query = self._path_query_tgt(bs)
+            
+            path_query = self.transformer_decoder(path_query, context_tokens)
 
-        path_pred = self.path_fc(path_query) # [B, T, 2]
-        path_pred = torch.cumsum(path_pred, dim=1)
+            # for cross-attn
+            # path_query, _ = self.transformer_decoder(path_query, context_tokens, context_tokens)
+
+
+        if self.config.use_arc_length_decoder:
+            path_pred, _ = self.arc_length_decoder(path_query[:, 0, :]) # [B, T, 2]
+        else:
+            path_pred = self.path_fc(path_query) # [B, T, 2]
+            path_pred = torch.cumsum(path_pred, dim=1)
         
         # Speed: hydra classification logits
         # speed: [B, 1] tensor
