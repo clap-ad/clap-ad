@@ -535,15 +535,16 @@ class PlanningHeadClap(nn.Module):
         )  # ADE
 
         # FDE: L1 loss at the last valid time step for each batch element
-        # Find the last valid index for each batch
-        last_indices = route_mask.long().sum(dim=1) - 1  # [B]
-        batch_indices = torch.arange(route_mask.shape[0], device=route_mask.device)
-        fde_pred = pred_route[batch_indices, last_indices, :]  # [B, 2]
-        fde_label = route_label[batch_indices, last_indices, :]  # [B, 2]
-        loss["loss_spatial_route"] += F.l1_loss(
-            fde_pred.float(),
-            fde_label.float(),
-        )  # FDE
+        if self.config.use_fde_loss:
+            # Find the last valid index for each batch
+            last_indices = route_mask.long().sum(dim=1) - 1  # [B]
+            batch_indices = torch.arange(route_mask.shape[0], device=route_mask.device)
+            fde_pred = pred_route[batch_indices, last_indices, :]  # [B, 2]
+            fde_label = route_label[batch_indices, last_indices, :]  # [B, 2]
+            loss["loss_spatial_route"] += F.l1_loss(
+                fde_pred.float(),
+                fde_label.float(),
+            )  # FDE
 
         curr_speed = data["speed"]
         path_pred = pred_route

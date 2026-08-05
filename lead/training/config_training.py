@@ -722,6 +722,9 @@ class TrainingConfig(BaseConfig):
     def target_speeds(self):
         return self.target_speed_classes
 
+    
+    # If false, only uses ADE loss for path prediction
+    use_fde_loss = True
     # If true smooth the route points with a spline.
     smooth_route = True
     # Number of route points we use for smoothing.
