@@ -63,6 +63,34 @@ class CarlaTransfuserAgent(AbstractAgent):
             device = torch.device("cuda:0")
         else:
             device = torch.device("cpu")
+        if device.type == "cuda":
+            # worker=single_machine_thread_pool runs each agent's initialize()
+            # in its own host thread, but never calls torch.cuda.set_device()
+            # for that thread. cuDNN/cuBLAS handles (used for the conv
+            # backbone) are cached per-thread and keyed off the thread's
+            # *current* CUDA device, not off the device of the tensors being
+            # operated on. Without this call every new thread implicitly
+            # defaults to "current device" cuda:0, so if this agent's model
+            # actually lives on a different GPU (idx above), cuDNN can bind
+            # its handle/workspace to the wrong device. This doesn't fail
+            # immediately -- it silently corrupts device-bound state and
+            # surfaces later as an asynchronous
+            # "CUDA error: an illegal memory access was encountered", often
+            # only after many scenarios have been processed. Pinning the
+            # thread's current device here makes all implicit-current-device
+            # CUDA state (cuDNN handles, RNG, etc.) consistent with `device`.
+            torch.cuda.set_device(device)
+        # Mixed precision training uses bfloat16; some GPUs (e.g. older
+        # architectures) don't support it, which raises
+        # "Current CUDA Device does not support bfloat16" from
+        # torch.amp.autocast at inference time. Weights are fp32, so it's safe
+        # to just disable mixed precision here rather than fail eval/vis runs.
+        if (
+            self._carla_model_config.use_mixed_precision_training
+            and device.type == "cuda"
+            and not torch.cuda.is_bf16_supported()
+        ):
+            self._carla_model_config.use_mixed_precision_training = False
         self._carla_open_loop_inference = CarlaOpenLoopInference(
             config_training=self._carla_model_config,
             config_open_loop=self._carla_config_open_loop,

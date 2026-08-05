@@ -202,7 +202,7 @@ class PlanningHeadClap(nn.Module):
             self.planning_context_encoder = PlanningContextEncoder(
                 config=self.config,
                 input_bev_channels=self.config.transfuser_token_dim,
-                device=config.device,
+                device=kwargs.get("device", config.device),
             )
         else:
             self.target_points_normalization_constants = torch.tensor(
