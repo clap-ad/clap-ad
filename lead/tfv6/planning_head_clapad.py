@@ -139,14 +139,17 @@ class PlanningHeadClap(nn.Module):
             self.path_query = nn.Parameter(
                 torch.randn(
                     1,
-                    1,
+                    self.config.num_path_queries,
                     self.config.transfuser_token_dim,
                 ) * 0.02
             )
+            
+            latent_dim = self.config.transfuser_token_dim * self.config.num_path_queries
+            
             self.arc_length_decoder = ArcLengthDecoder(
-                latent_dim=self.config.transfuser_token_dim,
-                pe_dim=self.config.transfuser_token_dim // 4,
-                hidden=self.config.transfuser_token_dim,
+                latent_dim=latent_dim,
+                pe_dim=latent_dim // 4,
+                hidden=latent_dim,
                 n_points=self.planning_steps,
             )
 
@@ -456,7 +459,7 @@ class PlanningHeadClap(nn.Module):
             plan_query = context_tokens
             
             if self.config.use_arc_length_decoder:
-                path_query = self.path_query.repeat(bs, 1, 1) # [B, transfuser_token_dim]
+                path_query = self.path_query.expand(bs, -1, -1) # [B, num_path_queries, transfuser_token_dim]
             else:
                 path_query = self._path_query_tgt(bs)
             
@@ -467,7 +470,8 @@ class PlanningHeadClap(nn.Module):
 
 
         if self.config.use_arc_length_decoder:
-            path_pred, _ = self.arc_length_decoder(path_query[:, 0, :]) # [B, T, 2]
+            path_query = path_query.flatten(1)  # [B, N*D]
+            path_pred, _ = self.arc_length_decoder(path_query) # [B, T, 2]
         else:
             path_pred = self.path_fc(path_query) # [B, T, 2]
             path_pred = torch.cumsum(path_pred, dim=1)

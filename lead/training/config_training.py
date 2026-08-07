@@ -700,6 +700,7 @@ class TrainingConfig(BaseConfig):
     
     # Flag for the 1-query path decoder
     use_arc_length_decoder = False
+    num_path_queries = 4
 
     # Used for TFv5 planning decoder
     gru_hidden_size = 64
