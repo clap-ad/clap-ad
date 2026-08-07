@@ -15,7 +15,7 @@ from omegaconf import DictConfig
 import pandas as pd
 
 from nuplan.planning.script.builders.logging_builder import build_logger
-from nuplan.planning.utils.multithreading.worker_utils import worker_map
+from nuplan.planning.utils.multithreading.worker_pool import Task
 
 from navsim.agents.abstract_agent import AbstractAgent
 from navsim.common.dataloader import SceneLoader, SceneFilter, MetricCacheLoader
@@ -32,6 +32,40 @@ logger = logging.getLogger(__name__)
 
 CONFIG_PATH = "config/pdm_scoring"
 CONFIG_NAME = "default_run_pdm_score"
+
+
+def _balance_data_points_by_token_count(
+    data_points: List[Dict[str, Any]], num_chunks: int
+) -> List[List[Dict[str, Any]]]:
+    """
+    Groups per-log data points (each holding all scenario tokens of one log file) into
+    `num_chunks` chunks, balanced by total token (scenario) count rather than by number of logs.
+
+    `scene_loader.get_tokens_list_per_log()` yields one entry per log file, but the number of
+    scenario tokens per log varies drastically (some logs yield only a handful of scenes after
+    filtering, others yield hundreds). Naively splitting the list of per-log entries into
+    equal-sized chunks (e.g. via `np.array_split`, as `worker_map`/`chunk_list` do) balances the
+    number of *logs* per worker/rank, not the number of *scenarios* -- causing large workload
+    imbalance across workers/ranks (e.g. one rank getting 1400 scenarios, another 2700).
+
+    This uses a greedy longest-processing-time-first (LPT) bin-packing heuristic: logs are
+    sorted by token count (descending) and each is assigned to the chunk with the currently
+    smallest total token count.
+    :param data_points: list of per-log dicts, each with a "tokens" list.
+    :param num_chunks: number of chunks (i.e. worker.number_of_threads) to balance across.
+    :return: list of chunks (each a list of per-log dicts), empty chunks omitted.
+    """
+    num_chunks = max(num_chunks, 1)
+    sorted_data_points = sorted(data_points, key=lambda data_point: len(data_point["tokens"]), reverse=True)
+
+    chunks: List[List[Dict[str, Any]]] = [[] for _ in range(num_chunks)]
+    chunk_token_counts = [0] * num_chunks
+    for data_point in sorted_data_points:
+        target_chunk_idx = min(range(num_chunks), key=lambda i: chunk_token_counts[i])
+        chunks[target_chunk_idx].append(data_point)
+        chunk_token_counts[target_chunk_idx] += len(data_point["tokens"])
+
+    return [chunk for chunk in chunks if len(chunk) > 0]
 
 
 def run_pdm_score(args: List[Dict[str, Union[List[str], DictConfig]]]) -> List[Dict[str, Any]]:
@@ -285,7 +319,11 @@ def main(cfg: DictConfig) -> None:
         }
         for log_file, tokens_list in scene_loader.get_tokens_list_per_log().items()
     ]
-    score_rows: List[Tuple[Dict[str, Any], int, int]] = worker_map(worker, run_pdm_score, data_points)
+    data_point_chunks = _balance_data_points_by_token_count(data_points, worker.number_of_threads)
+    scattered_score_rows = worker.map(Task(fn=run_pdm_score), data_point_chunks)
+    score_rows: List[Tuple[Dict[str, Any], int, int]] = [
+        score_row for score_rows in scattered_score_rows for score_row in score_rows
+    ]
 
     pdm_score_df = pd.DataFrame(score_rows)
     num_sucessful_scenarios = pdm_score_df["valid"].sum()
