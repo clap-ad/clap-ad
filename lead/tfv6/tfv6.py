@@ -102,7 +102,7 @@ class TFv6(nn.Module):
             if self.config.use_clapad_head:
                 self.planning_decoder = PlanningHeadClap(
                     input_bev_channels=self.backbone.num_lidar_features,
-                    num_speed_bins=len(self.config.speed_bins),
+                    num_speed_bins=len(self.config.target_speed_classes),
                     config=self.config,
                     device=self.device,
                 ).to(self.device)

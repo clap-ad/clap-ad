@@ -707,17 +707,54 @@ class TrainingConfig(BaseConfig):
 
     @property
     def target_speed_classes(self):
-        """Carla target speed prediction classes in m/s."""
+        """Candidate target speed classes in m/s.
+
+        Single source of truth for discrete speed bins, shared by the legacy
+        CARLA target-speed classification head (`predict_target_speed`) and
+        the CLAP-AD speed-scoring head (see `speed_bins` below). Unlike a raw
+        `torch.tensor` class attribute, this is a plain list, so it is JSON
+        serializable and gets persisted into every checkpoint's `config.json`
+        (see `training_utils.save_config`).
+        """
+        # Values used for CLAP-AD ECCV/NAVSIM
         return [
             0.0,
-            4.0,
-            8.0,
+            2.5,
+            5.0,
+            7.0,
+            8.5,
             10.0,
-            13.88888888,
-            16.0,
-            17.77777777,
-            20.0,
+            12.0,
         ]
+        
+        # Values used for CLAP-AD B2D-Speed
+        # return [
+        #     0.0,
+        #     2.77777778,
+        #     5.55555556,
+        #     6.94444444,
+        #     8.33333333,
+        #     9.72222222,
+        #     11.11111111,
+        #     12.5,
+        #     13.88888889,
+        #     15.27777778,
+        #     16.66666667,
+        #     18.05555556,
+        #     19.44444444
+        # ]
+        
+        # Values used in TFv6
+        # return [
+        #     0.0,
+        #     4.0,
+        #     8.0,
+        #     10.0,
+        #     13.88888888,
+        #     16.0,
+        #     17.77777777,
+        #     20.0,
+        # ]
 
     @property
     def target_speeds(self):
@@ -757,31 +794,22 @@ class TrainingConfig(BaseConfig):
     max_distance_future_waypoint = 10.0
     target_first_distance = 2.5 # same as lead
     use_tf_context_encoder = True # To use path and context (radar) as tf
-    # speed bins for the speed head
-    speed_bins = torch.tensor([
-        0.0,
-        2.77777778,
-        5.55555556,
-        6.94444444,
-        8.33333333,
-        9.72222222,
-        11.11111111,
-        12.5,
-        13.88888889,
-        15.27777778,
-        16.66666667,
-        18.05555556,
-        19.44444444
-    ]) # Changed for B2D-Speed benchmark
-    # speed_bins = torch.tensor([
-    #     0.0,
-    #     2.5,
-    #     5.0,
-    #     7.0,
-    #     8.5,
-    #     10.0,
-    #     12.0,
-    # ]) # paper
+
+    @overridable_property
+    def speed_bins(self):
+        """DEPRECATED alias for CLAP-AD's speed bins, kept only for backward
+        compatibility. New code (and CLAP-AD internals) should read
+        `target_speed_classes` directly instead.
+
+        Falls back to `target_speed_classes` when not explicitly overridden.
+        Explicit overrides (e.g. `LEAD_TRAINING_CONFIG="speed_bins=[...]"`, or
+        legacy-checkpoint backfills like
+        `scripts_navsim/vis_navsim_scenes.py::_apply_legacy_clapad_defaults`)
+        keep working unchanged, so old checkpoints trained with a different
+        bin count than the current `target_speed_classes` default still load
+        correctly.
+        """
+        return torch.tensor(self.target_speed_classes, dtype=torch.float32)
 
     @property
     def speed_scoring_cfg_dict(self):

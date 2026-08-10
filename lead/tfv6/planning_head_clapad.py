@@ -193,7 +193,7 @@ class PlanningHeadClap(nn.Module):
         self.speed_is_scores = True
 
         # Loss funcations
-        speed_bins = self.config.speed_bins
+        speed_bins = self.config.target_speed_classes
         self.loss_speed = SpeedScoringLoss(
             speed_bins=speed_bins,
             crt_cfg_dict=self.config.speed_scoring_cfg_dict,
