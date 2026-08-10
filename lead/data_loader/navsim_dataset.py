@@ -191,7 +191,12 @@ class NavsimData(Dataset):
             scene_score_info = [] # Empty list if scene info is not available
         else:
             scene_score_info = target["scene_info"] # Dict containing various scene scores
-            scene_score_info = preprocess_scene_info(scene_score_info) # Flip y-axis for all agents in scene info to align with CARLA
+            # Caches built before 2026-08-10 accidentally stored agent "bbox" as
+            # [w * 2, l * 2] (doubled full width/length). Caches built after the
+            # fix carry the "bbox_scale_fixed" marker; when it's absent, halve
+            # the bbox values here so old caches don't need to be rebuilt.
+            bbox_scale_fixed = target.get("bbox_scale_fixed", False)
+            scene_score_info = preprocess_scene_info(scene_score_info, bbox_scale_fixed=bbox_scale_fixed) # Flip y-axis for all agents in scene info to align with CARLA
 
         data = {
             "sequence_id": self.feature[index].split("/")[-3],
@@ -306,12 +311,19 @@ class NavsimData(Dataset):
         ).items():
             data["navsim_" + key] = value
 
-def preprocess_scene_info(scene_info: list):
+def preprocess_scene_info(scene_info: list, bbox_scale_fixed: bool = True):
     """
     To align with Carla, we will iterate over all coordinates of all
     agents and flip their y-axis together with its yaw
     Also to be compatible with Carla format, we add all info under
     "agents" key in a dict.
+
+    Args:
+        scene_info: list of per-actor dicts from the cached target.
+        bbox_scale_fixed: whether this cache was built after the 2026-08-10 fix
+            that stopped doubling agent "bbox" [width, length] values. When
+            False (legacy caches), the doubled bbox is halved back to the
+            correct full width/length here.
     """
     scene_info_processed = {}
     scene_info_processed["actors"] = []
@@ -323,6 +335,9 @@ def preprocess_scene_info(scene_info: list):
             elif key=="fut_wp":
                 actor_processed[key] = value.copy()
                 actor_processed[key][:, 1] = -actor_processed[key][:, 1] # Flip y-axis of future waypoints
+            elif key == "bbox" and not bbox_scale_fixed:
+                # Legacy cache: bbox was accidentally stored as [w * 2, l * 2].
+                actor_processed[key] = [v / 2 for v in value]
             else:
                 actor_processed[key] = value
         scene_info_processed["actors"].append(actor_processed)

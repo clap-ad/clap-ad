@@ -239,6 +239,13 @@ class TransfuserTargetBuilder(AbstractTargetBuilder):
             "path": path,
             "route": torch.tensor(route),
             "route_mask": torch.tensor(route_mask),
+            # Marker for backward/forward compatibility: caches built before
+            # 2026-08-10 stored agent "bbox" as [w * 2, l * 2] (accidentally
+            # doubled full width/length). Caches built with this flag present
+            # store the correct un-doubled [w, l]. Consumers (e.g.
+            # ``lead.data_loader.navsim_dataset.preprocess_scene_info``) check
+            # for this key's absence to auto-halve bbox values from old caches.
+            "bbox_scale_fixed": True,
         }
 
     def _compute_agent_targets(self, annotations: Annotations) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -579,7 +586,10 @@ def get_scene_score_info_from_scene(scene) -> list[dict]:
             "vx": vx,
             "vy": vy,
             "yaw": yaw,
-            "bbox": [w * 2, l * 2],
+            # NOTE: w, l are already FULL width/length (see ``half_w, half_l = w / 2, l / 2``
+            # above), NOT half-extents -- do not double them here (that was a bug, fixed
+            # 2026-08-10; see ``bbox_scale_fixed`` marker in ``TransfuserTargetBuilder.compute_targets``).
+            "bbox": [w, l],
             "fut_wp": fut_wp_ups,
             "fut_wp_invalid": fut_wp_invalid,
             "corners": corners
