@@ -30,12 +30,23 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 import numpy as np
 
+from shapely import affinity
+
+from nuplan.common.actor_state.state_representation import StateSE2
+from nuplan.common.actor_state.vehicle_parameters import get_pacifica_parameters
+from nuplan.common.actor_state.oriented_box import OrientedBox
+from nuplan.common.maps.maps_datatypes import SemanticMapLayer
+from nuplan.planning.simulation.trajectory.trajectory_sampling import TrajectorySampling
+
 from navsim.agents.abstract_agent import AbstractAgent
 from navsim.agents.constant_velocity_agent import ConstantVelocityAgent
 from navsim.agents.carla_transfuser_agent import CarlaTransfuserAgent
 from navsim.agents.transfuser.transfuser_config import TransfuserConfig
 from navsim.common.dataclasses import SceneFilter, SensorConfig
-from navsim.common.dataloader import SceneLoader
+from navsim.common.dataloader import MetricCacheLoader, SceneLoader
+from navsim.evaluate.pdm_score import pdm_score
+from navsim.planning.simulation.planner.pdm_planner.scoring.pdm_scorer import PDMScorer
+from navsim.planning.simulation.planner.pdm_planner.simulation.pdm_simulator import PDMSimulator
 from navsim.visualization.plots import (
     plot_cameras_frame_with_annotations,
     configure_bev_ax,
@@ -44,8 +55,15 @@ from navsim.visualization.plots import (
 from navsim.visualization.bev import (
     add_configured_bev_on_ax,
     add_trajectory_to_bev_ax,
+    add_polygon_to_bev_ax,
+    add_oriented_box_to_bev_ax,
 )
 from navsim.visualization.config import TRAJECTORY_CONFIG
+
+# Shared proposal sampling for PDM simulation/scoring: 40 poses @ 0.1s = 4s,
+# matching navsim/planning/script/config/pdm_scoring/default_scoring_parameters.yaml
+# (used both for the --detailed LQR rollout overlay and for real PDMS scoring).
+PROPOSAL_SAMPLING = TrajectorySampling(num_poses=40, interval_length=0.1)
 
 V4_CKPT = (
     "/data/datasets/AD_datasets/Bench2Drive-ckpts/thomas/clapad/navsim/"
@@ -57,7 +75,35 @@ V5_CKPT = (
     "TestByeaghajanzadeh_20260722_084623/model_0060.pth"
 )
 
-DEFAULT_CKPT = V5_CKPT
+V6_CKPT = (
+    "/data/datasets/AD_datasets/Bench2Drive-ckpts/thomas/clapad/navsim/"
+    "TestByeaghajanzadeh_20260722_084623_v3/model_0060.pth"
+)
+
+V7_CKPT = (
+    "/data/datasets/AD_datasets/Bench2Drive-ckpts/thomas/clapad/navsim/"
+    "TestByeaghajanzadeh_20260722_084623_v7/model_0037.pth"
+)
+
+V8_CKPT = (
+    "/data/datasets/AD_datasets/Bench2Drive-ckpts/thomas/clapad/navsim/"
+    "TestByeaghajanzadeh_20260722_084623_v8/model_0060.pth"
+)
+
+OVERFIT_CKPT = (
+    "/workspace/lead/outputs/local_training/navsim_overfit_eaghajanzadeh_20260804_192203/model_0113.pth"
+)
+
+V9_CKPT = (
+    "/data/datasets/AD_datasets/Bench2Drive-ckpts/thomas/clapad/navsim/"
+    "TestByeaghajanzadeh_20260805_094518/model_0060.pth"
+)
+
+V12_CKPT = (
+    "/workspace/lead/outputs/local_training/TestByeaghajanzadeh_20260810_164007/model_0059.pth"
+)
+
+DEFAULT_CKPT = V12_CKPT
 
 # token -> label. Mix of failure buckets (from the navtest CSV) and clean scenes.
 DEFAULT_TOKENS = {
@@ -100,6 +146,21 @@ def _apply_legacy_clapad_defaults(checkpoint: str) -> None:
         CarlaTrainingConfig.speed_bins = torch.tensor(
             [0.0, 2.5, 5.0, 7.0, 8.5, 10.0, 12.0]
         )
+        # CarlaTrainingConfig.speed_bins = torch.tensor([
+        #     0.0,
+        #     2.77777778,
+        #     5.55555556,
+        #     6.94444444,
+        #     8.33333333,
+        #     9.72222222,
+        #     11.11111111,
+        #     12.5,
+        #     13.88888889,
+        #     15.27777778,
+        #     16.66666667,
+        #     18.05555556,
+        #     19.44444444
+        # ])
 
 
 def build_agent(kind: str, checkpoint: str) -> AbstractAgent:
@@ -280,12 +341,236 @@ def draw_score_row(ax, score_matrix, speed_bins, target_speed, ylabel, threshold
     ax.legend(fontsize=7, ncol=n_used + 2, loc="lower left")
 
 
-def draw_bev_on_ax(ax, scene, agent) -> None:
-    """Replicate ``plot_bev_with_agent`` onto a provided axes."""
+# Default BEV framing: keeps the full CLAP-AD path (~48 m) and GT route in
+# view, unlike the navsim default (+/-32 m square), which sometimes clips the
+# route ahead of the ego. Forward/backward are in the ego +x direction (drawn
+# on the ax y-axis); lateral is +/-y (drawn on the ax x-axis).
+BEV_FORWARD_M = 55.0
+BEV_BACKWARD_M = 25.0
+BEV_LATERAL_M = 40.0
+
+# Drivable-area boundary overlay (--detailed). Not one of navsim's default BEV
+# layers (``add_map_to_bev_ax`` only draws LANE/WALKWAYS/CARPARK_AREA/
+# INTERSECTION/STOP_LINE/CROSSWALK) but matches what the PDM scorer actually
+# checks ego against for drivable-area compliance.
+DRIVABLE_AREA_COLOR = "#e6194b"
+DRIVABLE_AREA_CONFIG = {
+    "fill_color": DRIVABLE_AREA_COLOR,
+    "fill_color_alpha": 0.0,
+    "line_color": DRIVABLE_AREA_COLOR,
+    "line_color_alpha": 1.0,
+    "line_width": 1.5,
+    "line_style": "--",
+    "zorder": 1.5,
+}
+
+
+
+# Layers that make up "drivable area" for object-based map queries.
+# NOTE: ``SemanticMapLayer.DRIVABLE_AREA`` itself has no object representation
+# in NuPlanMap.get_proximal_map_objects (raises AssertionError -- it only
+# backs a raster/vector layer, not queryable MapObjects). navsim's own PDM
+# scorer hits this exact limitation (see
+# ``PDMDrivableMap.from_simulation``, which has a
+# "TODO: Fix SemanticMapLayer.DRIVABLE_AREA problems" comment) and instead
+# reconstructs the drivable area from these four object layers -- mirrored
+# here for the visualization overlay.
+DRIVABLE_AREA_LAYERS = [
+    SemanticMapLayer.ROADBLOCK,
+    SemanticMapLayer.ROADBLOCK_CONNECTOR,
+    SemanticMapLayer.INTERSECTION,
+    SemanticMapLayer.CARPARK_AREA,
+]
+
+
+def add_drivable_area_to_bev_ax(ax, map_api, origin: StateSE2, radius: float) -> None:
+    """Overlay the drivable-area polygon boundary on a BEV axes.
+
+    Reproduces the local-frame transform used internally by
+    ``navsim.visualization.bev.add_map_to_bev_ax`` (which does not expose a
+    drivable-area layer) over the ``DRIVABLE_AREA_LAYERS`` union.
+    """
+    map_object_dict = map_api.get_proximal_map_objects(
+        point=origin.point, radius=radius, layers=DRIVABLE_AREA_LAYERS
+    )
+
+    a, b = np.cos(origin.heading), np.sin(origin.heading)
+    d, e = -np.sin(origin.heading), np.cos(origin.heading)
+    xoff, yoff = -origin.x, -origin.y
+
+    for layer in DRIVABLE_AREA_LAYERS:
+        for map_object in map_object_dict[layer]:
+            translated = affinity.affine_transform(map_object.polygon, [1, 0, 0, 1, xoff, yoff])
+            rotated = affinity.affine_transform(translated, [a, b, d, e, 0, 0])
+            add_polygon_to_bev_ax(ax, rotated, DRIVABLE_AREA_CONFIG)
+
+
+# LQR rollout overlay (--detailed). navsim's PDM scorer never scores the raw
+# predicted trajectory directly: ``navsim/evaluate/pdm_score.py::pdm_score``
+# re-simulates it through ``PDMSimulator`` (``BatchLQRTracker`` +
+# ``BatchKinematicBicycleModel``, ``proposal_sampling`` = 40 poses @ 0.1s = 4s,
+# see ``navsim/planning/script/config/pdm_scoring/default_scoring_parameters.yaml``)
+# before scoring it. This overlay reproduces that exact closed-loop rollout so
+# the 40 future ego boxes shown match what the PDM scorer actually evaluates.
+LQR_BOX_COLOR = "#3d85c6"
+LQR_BOX_CONFIG = {
+    "fill_color": LQR_BOX_COLOR,
+    "fill_color_alpha": 0.08,
+    "line_color": LQR_BOX_COLOR,
+    "line_color_alpha": 0.5,
+    "line_width": 1.0,
+    "line_style": "-",
+    "zorder": 1.8,
+}
+HUMAN_LQR_BOX_COLOR = HUMAN_COLOR
+HUMAN_LQR_BOX_CONFIG = {
+    "fill_color": HUMAN_LQR_BOX_COLOR,
+    "fill_color_alpha": 0.08,
+    "line_color": HUMAN_LQR_BOX_COLOR,
+    "line_color_alpha": 0.5,
+    "line_width": 1.0,
+    "line_style": "-",
+    "zorder": 1.8,
+}
+
+
+def _build_initial_ego_state(scene, frame_idx: int):
+    """Build nuPlan's ``EgoState`` for a scene frame (mirrors
+    ``NavSimScenario.get_ego_state_at_iteration``, which navsim itself uses to
+    feed the PDM simulator/scorer)."""
+    from nuplan.common.actor_state.ego_state import EgoState
+    from nuplan.common.actor_state.state_representation import StateVector2D, TimePoint
+
+    frame = scene.frames[frame_idx]
+    return EgoState.build_from_rear_axle(
+        StateSE2(*frame.ego_status.ego_pose),
+        tire_steering_angle=0.0,
+        vehicle_parameters=get_pacifica_parameters(),
+        time_point=TimePoint(int(frame.timestamp)),
+        rear_axle_velocity_2d=StateVector2D(*frame.ego_status.ego_velocity),
+        rear_axle_acceleration_2d=StateVector2D(*frame.ego_status.ego_acceleration),
+    )
+
+
+def add_lqr_rollout_to_bev_ax(ax, scene, trajectory, box_config=LQR_BOX_CONFIG) -> None:
+    """Overlay the 40 future ego bounding boxes from the LQR-tracked rollout.
+
+    Reproduces ``navsim/evaluate/pdm_score.py::pdm_score``: converts a raw
+    predicted/GT ``Trajectory`` (ego frame) to an absolute-frame reference
+    trajectory, then re-simulates it through ``PDMSimulator`` (LQR tracker +
+    kinematic bicycle model) exactly as the PDM scorer does before computing
+    DAC/collision/TTC/etc, rather than plotting the raw (untracked) path.
+    Works for both the agent's predicted trajectory and the human (GT)
+    trajectory, since both are navsim ``Trajectory`` dataclasses.
+    """
+    from navsim.agents.transfuser.transfuser_features import (
+        convert_absolute_to_relative_se2_array,
+    )
+    from navsim.evaluate.pdm_score import get_trajectory_as_array, transform_trajectory
+    from navsim.planning.simulation.planner.pdm_planner.utils.pdm_enums import StateIndex
+
+    frame_idx = scene.scene_metadata.num_history_frames - 1
+    initial_ego_state = _build_initial_ego_state(scene, frame_idx)
+    origin = StateSE2(*scene.frames[frame_idx].ego_status.ego_pose)
+
+    proposal_sampling = PROPOSAL_SAMPLING
+    pred_trajectory = transform_trajectory(trajectory, initial_ego_state)
+    pred_states = get_trajectory_as_array(pred_trajectory, proposal_sampling, initial_ego_state.time_point)
+
+    simulator = PDMSimulator(proposal_sampling)
+    simulated_states = simulator.simulate_proposals(pred_states[None, ...], initial_ego_state)[0]
+
+    global_se2 = simulated_states[1:, StateIndex.STATE_SE2]  # (40, 3); skip t=0 (== current ego)
+    local_se2 = convert_absolute_to_relative_se2_array(origin, global_se2)
+
+    vehicle = get_pacifica_parameters()
+    for x, y, heading in local_se2:
+        box = OrientedBox(StateSE2(x, y, heading), vehicle.length, vehicle.width, vehicle.height)
+        add_oriented_box_to_bev_ax(ax, box, box_config, add_heading=False)
+
+
+# Ordered (label, PDMResults field) pairs for rendering PDMS subscores.
+PDMS_FIELDS = [
+    ("NC", "no_at_fault_collisions"),
+    ("DAC", "drivable_area_compliance"),
+    ("EP", "ego_progress"),
+    ("TTC", "time_to_collision_within_bound"),
+    ("Comf", "comfort"),
+    ("DDC", "driving_direction_compliance"),
+]
+
+
+def evaluate_pdms(metric_cache_loader: MetricCacheLoader, token: str, agent_trajectory):
+    """Run the actual PDM-Score evaluation for one token, if it's cached.
+
+    Reproduces ``navsim/planning/script/run_pdm_score.py``'s per-token scoring
+    step: loads the pre-built ``MetricCache`` (GT observation, centerline,
+    route, drivable-area map -- see
+    ``navsim/planning/metric_caching/metric_cache_processor.py``) and calls
+    ``navsim.evaluate.pdm_score.pdm_score`` on the agent's predicted
+    trajectory. Returns ``None`` (with a warning) if ``token`` has no cached
+    metric cache entry, rather than building one on the fly (that requires
+    the full nuPlan scenario/map pipeline and is what the offline caching
+    step -- ``scripts_navsim/build_navsim_cache.sh`` et al. -- is for).
+    :return: ``navsim.common.dataclasses.PDMResults`` or ``None``.
+    """
+    if token not in metric_cache_loader.metric_cache_paths:
+        print(f"  [warn] token {token} not found in metric cache; skipping PDMS")
+        return None
+
+    metric_cache = metric_cache_loader.get_from_token(token)
+    simulator = PDMSimulator(PROPOSAL_SAMPLING)
+    scorer = PDMScorer(PROPOSAL_SAMPLING)
+    return pdm_score(
+        metric_cache=metric_cache,
+        model_trajectory=agent_trajectory,
+        future_sampling=PROPOSAL_SAMPLING,
+        simulator=simulator,
+        scorer=scorer,
+    )
+
+
+def draw_pdms_text_on_ax(ax, pdms_result) -> None:
+    """Render the PDMS subscores + final score as a text box (bottom-left)."""
+    lines = [f"PDMS: {pdms_result.score:.3f}"]
+    lines += [f"  {label}: {getattr(pdms_result, field):.2f}" for label, field in PDMS_FIELDS]
+    ax.text(
+        0.02, 0.02, "\n".join(lines),
+        transform=ax.transAxes, va="bottom", ha="left", fontsize=9,
+        family="monospace", zorder=5,
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.85),
+    )
+
+
+def draw_bev_on_ax(
+    ax,
+    scene,
+    agent,
+    forward_m: float = BEV_FORWARD_M,
+    backward_m: float = BEV_BACKWARD_M,
+    lateral_m: float = BEV_LATERAL_M,
+    detailed: bool = False,
+):
+    """Replicate ``plot_bev_with_agent`` onto a provided axes.
+
+    Overrides the default (symmetric +/-32 m) BEV framing so that
+    ``forward_m`` metres ahead of the ego are always visible, since CLAP-AD's
+    predicted/GT paths can extend ~50 m ahead and the default view clips them.
+    ``detailed=True`` additionally overlays the drivable-area boundary.
+    :return: ``(human_trajectory, agent_trajectory)`` navsim ``Trajectory``
+        dataclasses, so callers (e.g. PDMS scoring) can reuse them without an
+        extra agent forward pass.
+    """
     frame_idx = scene.scene_metadata.num_history_frames - 1
     human_trajectory = scene.get_future_trajectory()
     agent_trajectory = agent.compute_trajectory(scene.get_agent_input())
     add_configured_bev_on_ax(ax, scene.map_api, scene.frames[frame_idx])
+    if detailed:
+        origin = StateSE2(*scene.frames[frame_idx].ego_status.ego_pose)
+        radius = max(forward_m, backward_m, lateral_m)
+        add_drivable_area_to_bev_ax(ax, scene.map_api, origin, radius)
+        add_lqr_rollout_to_bev_ax(ax, scene, agent_trajectory, LQR_BOX_CONFIG)
+        add_lqr_rollout_to_bev_ax(ax, scene, human_trajectory, HUMAN_LQR_BOX_CONFIG)
     human_cfg = {**TRAJECTORY_CONFIG["human"],
                  "fill_color": HUMAN_COLOR, "line_color": HUMAN_COLOR}
     agent_cfg = {**TRAJECTORY_CONFIG["agent"],
@@ -294,6 +579,10 @@ def draw_bev_on_ax(ax, scene, agent) -> None:
     add_trajectory_to_bev_ax(ax, agent_trajectory, agent_cfg)
     configure_bev_ax(ax)
     configure_ax(ax)
+    # x forward, y sideways; ax.set_ylim controls the forward/backward extent.
+    ax.set_ylim(-backward_m, forward_m)
+    ax.set_xlim(lateral_m, -lateral_m)  # inverted: left is +y
+    return human_trajectory, agent_trajectory
 
 
 def extract_gt_route(agent, scene, future_local=None):
@@ -456,9 +745,29 @@ def main() -> None:
         "cameras, no score bars). Honors --compare-gt.",
     )
     parser.add_argument(
+        "--detailed",
+        action="store_true",
+        help="Additionally overlay the drivable-area boundary (the region "
+        "the PDM scorer's drivable-area-compliance metric checks ego against) "
+        "on the BEV plot.",
+    )
+    parser.add_argument(
+        "--metric-cache-path",
+        default=None,
+        help="Directory of a pre-built PDM metric cache (see "
+        "scripts_navsim/build_navsim_cache.sh), used to actually run PDM-Score "
+        "evaluation for each rendered token (default: "
+        "$NAVSIM_EXP_ROOT/metric_cache_navtest).",
+    )
+    parser.add_argument(
+        "--no-pdms",
+        action="store_true",
+        help="Skip running PDM-Score evaluation (no PDMS text on the BEV plot).",
+    )
+    parser.add_argument(
         "--out",
         default=None,
-        help="Output dir (default: /workspace/temp_vis/navsim_viz/<timestamp>).",
+        help="Output dir (default: /workspace/lead/outputs/navsim_viz/<timestamp>).",
     )
     args = parser.parse_args()
 
@@ -477,7 +786,7 @@ def main() -> None:
 
     out_dir = Path(
         args.out
-        or f"/workspace/temp_vis/navsim_viz/{datetime.now():%Y.%m.%d.%H.%M.%S}"
+        or f"/workspace/lead/outputs/navsim_viz/{datetime.now():%Y.%m.%d.%H.%M.%S}"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output directory: {out_dir}")
@@ -502,6 +811,17 @@ def main() -> None:
 
     agent = build_agent(args.agent, args.checkpoint)
     print(f"Agent: {args.agent}")
+
+    metric_cache_loader = None
+    if not args.no_pdms:
+        metric_cache_path = args.metric_cache_path or os.path.join(
+            os.environ["NAVSIM_EXP_ROOT"], "metric_cache_navtest"
+        )
+        try:
+            metric_cache_loader = MetricCacheLoader(Path(metric_cache_path))
+            print(f"PDMS evaluation: ON ({len(metric_cache_loader)} cached tokens in {metric_cache_path})")
+        except Exception as exc:
+            print(f"  [warn] could not load metric cache at {metric_cache_path} ({exc}); skipping PDMS")
 
     found = set(scene_loader.tokens)
     missing = [t for t in tokens if t not in found]
@@ -574,7 +894,15 @@ def main() -> None:
             fig, ax = plt.subplots(figsize=(8, 8))
             ax_pred = ax_gt = None
 
-        draw_bev_on_ax(ax, scene, agent)
+        _, agent_trajectory = draw_bev_on_ax(ax, scene, agent, detailed=args.detailed)
+        pdms_result = None
+        if metric_cache_loader is not None:
+            pdms_result = evaluate_pdms(metric_cache_loader, token, agent_trajectory)
+            if pdms_result is not None:
+                draw_pdms_text_on_ax(ax, pdms_result)
+                print(f"  PDMS[{token}] = {pdms_result.score:.3f} "
+                      + " ".join(f"{label}={getattr(pdms_result, field):.2f}"
+                                 for label, field in PDMS_FIELDS))
         agent_label = "CLAP-AD trajectory" if is_clapad else "Const-vel"
         legend_handles = [
             Line2D([0], [0], color=HUMAN_COLOR, lw=2, marker="o",
@@ -582,6 +910,21 @@ def main() -> None:
             Line2D([0], [0], color=TRAJ_COLOR, lw=2, marker="o",
                    markeredgecolor="black", label=agent_label),
         ]
+        if args.detailed:
+            legend_handles.append(
+                Line2D([0], [0], color=DRIVABLE_AREA_COLOR, lw=1.5, ls="--",
+                       label="Drivable area")
+            )
+            legend_handles.append(
+                Line2D([0], [0], color=LQR_BOX_COLOR, lw=1.0, marker="s",
+                       markersize=6, linestyle="none",
+                       label="Agent LQR rollout (40 poses)")
+            )
+            legend_handles.append(
+                Line2D([0], [0], color=HUMAN_LQR_BOX_COLOR, lw=1.0, marker="s",
+                       markersize=6, linestyle="none",
+                       label="Human LQR rollout (40 poses)")
+            )
         if is_clapad:
             current_speed, target_speed, pred_scores, gt_scores, speed_bins, pred_path = (
                 clapad_prediction(agent, scene)
@@ -651,4 +994,23 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    PROJECT_DIR = "/workspace/lead"
+    NAVSIM_ROOT = f"{PROJECT_DIR}/3rd_party/navsim_workspace"
+    DEVKIT = f"{NAVSIM_ROOT}/navsimv1.1"
+
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
+    os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+    os.environ["HYDRA_FULL_ERROR"] = "1"
+    os.environ["LEAD_PROJECT_ROOT"] = PROJECT_DIR
+    os.environ["NUPLAN_MAP_VERSION"] = "nuplan-maps-v1.0"
+    os.environ["NUPLAN_MAPS_ROOT"] = f"{NAVSIM_ROOT}/dataset/maps"
+    os.environ["NAVSIM_EXP_ROOT"] = f"{NAVSIM_ROOT}/exp"
+    os.environ["NAVSIM_DEVKIT_ROOT"] = DEVKIT
+    os.environ["OPENSCENE_DATA_ROOT"] = f"{NAVSIM_ROOT}/dataset"
+
+    pythonpath = os.environ.get("PYTHONPATH", "")
+    os.environ["PYTHONPATH"] = (
+        f"{PROJECT_DIR}:{pythonpath}" if pythonpath else PROJECT_DIR
+    )
+    
     main()
