@@ -42,11 +42,15 @@ from navsim.agents.abstract_agent import AbstractAgent
 from navsim.agents.constant_velocity_agent import ConstantVelocityAgent
 from navsim.agents.carla_transfuser_agent import CarlaTransfuserAgent
 from navsim.agents.transfuser.transfuser_config import TransfuserConfig
-from navsim.common.dataclasses import SceneFilter, SensorConfig
+from navsim.agents.transfuser.transfuser_features import (
+    convert_absolute_to_relative_se2_array,
+)
+from navsim.common.dataclasses import SceneFilter, SensorConfig, Trajectory
 from navsim.common.dataloader import MetricCacheLoader, SceneLoader
-from navsim.evaluate.pdm_score import pdm_score
+from navsim.evaluate.pdm_score import get_trajectory_as_array, pdm_score
 from navsim.planning.simulation.planner.pdm_planner.scoring.pdm_scorer import PDMScorer
 from navsim.planning.simulation.planner.pdm_planner.simulation.pdm_simulator import PDMSimulator
+from navsim.planning.simulation.planner.pdm_planner.utils.pdm_enums import StateIndex
 from navsim.visualization.plots import (
     plot_cameras_frame_with_annotations,
     configure_bev_ax,
@@ -198,6 +202,7 @@ TRAJ_COLOR = "#8e44ad"       # purple     -> CLAP-AD resolved trajectory
 PRED_PATH_COLOR = "#5dade2"  # light blue -> CLAP-AD raw predicted path (sdc_traj)
 GT_PATH_COLOR = "#f4c20d"    # yellow     -> extracted GT path (ego future route)
 OLD_GT_COLOR = "#e67e22"     # orange     -> previous (windowed) GT path, --compare-gt
+PDM_CLOSED_COLOR = "#00838f" # teal       -> PDM-Closed trajectory (from metric cache)
 
 
 def zero_score_tokens(csv_path: str) -> dict:
@@ -439,6 +444,16 @@ HUMAN_LQR_BOX_CONFIG = {
     "line_style": "-",
     "zorder": 1.8,
 }
+PDM_CLOSED_LQR_BOX_COLOR = PDM_CLOSED_COLOR
+PDM_CLOSED_LQR_BOX_CONFIG = {
+    "fill_color": PDM_CLOSED_LQR_BOX_COLOR,
+    "fill_color_alpha": 0.08,
+    "line_color": PDM_CLOSED_LQR_BOX_COLOR,
+    "line_color_alpha": 0.5,
+    "line_width": 1.0,
+    "line_style": "-",
+    "zorder": 1.8,
+}
 
 
 def _build_initial_ego_state(scene, frame_idx: int):
@@ -507,25 +522,46 @@ PDMS_FIELDS = [
 ]
 
 
-def evaluate_pdms(metric_cache_loader: MetricCacheLoader, token: str, agent_trajectory):
-    """Run the actual PDM-Score evaluation for one token, if it's cached.
+def load_metric_cache(metric_cache_loader: MetricCacheLoader, token: str):
+    """Load the cached ``MetricCache`` for ``token``, or ``None`` if missing."""
+    if token not in metric_cache_loader.metric_cache_paths:
+        print(f"  [warn] token {token} not found in metric cache")
+        return None
+    return metric_cache_loader.get_from_token(token)
+
+
+def extract_pdm_closed_trajectory(metric_cache, num_poses: int = 10, interval_length: float = 0.5):
+    """Extract the PDM-Closed reference trajectory stored in the metric cache.
+
+    ``metric_cache.trajectory`` is the ``InterpolatedTrajectory`` produced by
+    running ``PDMClosedPlanner`` at cache-build time (see
+    ``navsim/planning/metric_caching/metric_cache_processor.py``), in the
+    absolute (nuPlan scenario) frame anchored at ``metric_cache.ego_state``.
+    This mirrors the same extraction ``navsim.evaluate.pdm_score.pdm_score``
+    does internally before scoring it, but converts the result back to the
+    ego-local ``(x, y, heading)`` frame so it can be overlaid like the
+    human/agent trajectories.
+    :return: navsim ``Trajectory`` dataclass in local (ego rear-axle) frame.
+    """
+    initial_ego_state = metric_cache.ego_state
+    sampling = TrajectorySampling(num_poses=num_poses, interval_length=interval_length)
+    states = get_trajectory_as_array(metric_cache.trajectory, sampling, initial_ego_state.time_point)
+    global_se2 = states[1:, StateIndex.STATE_SE2]  # skip t=0 (current ego), (num_poses, 3)
+    local_se2 = convert_absolute_to_relative_se2_array(initial_ego_state.rear_axle, global_se2)
+    return Trajectory(local_se2.astype(np.float32), sampling)
+
+
+def evaluate_pdms(metric_cache, agent_trajectory):
+    """Run the actual PDM-Score evaluation for one token's cached metric cache.
 
     Reproduces ``navsim/planning/script/run_pdm_score.py``'s per-token scoring
-    step: loads the pre-built ``MetricCache`` (GT observation, centerline,
+    step: uses the pre-built ``MetricCache`` (GT observation, centerline,
     route, drivable-area map -- see
     ``navsim/planning/metric_caching/metric_cache_processor.py``) and calls
     ``navsim.evaluate.pdm_score.pdm_score`` on the agent's predicted
-    trajectory. Returns ``None`` (with a warning) if ``token`` has no cached
-    metric cache entry, rather than building one on the fly (that requires
-    the full nuPlan scenario/map pipeline and is what the offline caching
-    step -- ``scripts_navsim/build_navsim_cache.sh`` et al. -- is for).
-    :return: ``navsim.common.dataclasses.PDMResults`` or ``None``.
+    trajectory.
+    :return: ``navsim.common.dataclasses.PDMResults``.
     """
-    if token not in metric_cache_loader.metric_cache_paths:
-        print(f"  [warn] token {token} not found in metric cache; skipping PDMS")
-        return None
-
-    metric_cache = metric_cache_loader.get_from_token(token)
     simulator = PDMSimulator(PROPOSAL_SAMPLING)
     scorer = PDMScorer(PROPOSAL_SAMPLING)
     return pdm_score(
@@ -557,6 +593,9 @@ def draw_bev_on_ax(
     backward_m: float = BEV_BACKWARD_M,
     lateral_m: float = BEV_LATERAL_M,
     detailed: bool = False,
+    show_human: bool = False,
+    show_pdm_closed: bool = True,
+    metric_cache=None,
 ):
     """Replicate ``plot_bev_with_agent`` onto a provided axes.
 
@@ -564,32 +603,48 @@ def draw_bev_on_ax(
     ``forward_m`` metres ahead of the ego are always visible, since CLAP-AD's
     predicted/GT paths can extend ~50 m ahead and the default view clips them.
     ``detailed=True`` additionally overlays the drivable-area boundary.
-    :return: ``(human_trajectory, agent_trajectory)`` navsim ``Trajectory``
-        dataclasses, so callers (e.g. PDMS scoring) can reuse them without an
-        extra agent forward pass.
+    ``show_human``/``show_pdm_closed`` independently toggle the human (GT) and
+    PDM-Closed (from ``metric_cache``, if provided) reference trajectories.
+    :return: ``(human_trajectory, agent_trajectory, pdm_closed_trajectory)``
+        navsim ``Trajectory`` dataclasses (``pdm_closed_trajectory`` is
+        ``None`` if unavailable), so callers (e.g. PDMS scoring) can reuse
+        them without an extra agent forward pass.
     """
     frame_idx = scene.scene_metadata.num_history_frames - 1
     human_trajectory = scene.get_future_trajectory()
     agent_trajectory = agent.compute_trajectory(scene.get_agent_input())
+    pdm_closed_trajectory = (
+        extract_pdm_closed_trajectory(metric_cache)
+        if show_pdm_closed and metric_cache is not None
+        else None
+    )
     add_configured_bev_on_ax(ax, scene.map_api, scene.frames[frame_idx])
     if detailed:
         origin = StateSE2(*scene.frames[frame_idx].ego_status.ego_pose)
         radius = max(forward_m, backward_m, lateral_m)
         add_drivable_area_to_bev_ax(ax, scene.map_api, origin, radius)
         add_lqr_rollout_to_bev_ax(ax, scene, agent_trajectory, LQR_BOX_CONFIG)
-        add_lqr_rollout_to_bev_ax(ax, scene, human_trajectory, HUMAN_LQR_BOX_CONFIG)
+        if show_human:
+            add_lqr_rollout_to_bev_ax(ax, scene, human_trajectory, HUMAN_LQR_BOX_CONFIG)
+        if pdm_closed_trajectory is not None:
+            add_lqr_rollout_to_bev_ax(ax, scene, pdm_closed_trajectory, PDM_CLOSED_LQR_BOX_CONFIG)
     human_cfg = {**TRAJECTORY_CONFIG["human"],
                  "fill_color": HUMAN_COLOR, "line_color": HUMAN_COLOR}
     agent_cfg = {**TRAJECTORY_CONFIG["agent"],
                  "fill_color": TRAJ_COLOR, "line_color": TRAJ_COLOR}
-    add_trajectory_to_bev_ax(ax, human_trajectory, human_cfg)
+    pdm_closed_cfg = {**TRAJECTORY_CONFIG["agent"],
+                      "fill_color": PDM_CLOSED_COLOR, "line_color": PDM_CLOSED_COLOR}
+    if show_human:
+        add_trajectory_to_bev_ax(ax, human_trajectory, human_cfg)
     add_trajectory_to_bev_ax(ax, agent_trajectory, agent_cfg)
+    if pdm_closed_trajectory is not None:
+        add_trajectory_to_bev_ax(ax, pdm_closed_trajectory, pdm_closed_cfg)
     configure_bev_ax(ax)
     configure_ax(ax)
     # x forward, y sideways; ax.set_ylim controls the forward/backward extent.
     ax.set_ylim(-backward_m, forward_m)
     ax.set_xlim(lateral_m, -lateral_m)  # inverted: left is +y
-    return human_trajectory, agent_trajectory
+    return human_trajectory, agent_trajectory, pdm_closed_trajectory
 
 
 def extract_gt_route(agent, scene, future_local=None):
@@ -774,6 +829,19 @@ def main() -> None:
         help="Skip running PDM-Score evaluation (no PDMS text on the BEV plot).",
     )
     parser.add_argument(
+        "--show-human",
+        action="store_true",
+        help="Overlay the human (GT) future trajectory in green. Off by default.",
+    )
+    parser.add_argument(
+        "--no-pdm-closed",
+        dest="show_pdm_closed",
+        action="store_false",
+        help="Hide the PDM-Closed reference trajectory (from the metric cache, "
+        "teal) on the BEV plot. Shown by default.",
+    )
+    parser.set_defaults(show_pdm_closed=True)
+    parser.add_argument(
         "--out",
         default=None,
         help="Output dir (default: /workspace/lead/outputs/navsim_viz/<timestamp>).",
@@ -824,15 +892,19 @@ def main() -> None:
     print(f"Agent: {args.agent}")
 
     metric_cache_loader = None
-    if not args.no_pdms:
+    if not args.no_pdms or args.show_pdm_closed:
+        # metric_cache_path = args.metric_cache_path or os.path.join(
+        #     os.environ["NAVSIM_EXP_ROOT"], "metric_cache_navtest"
+        # )
         metric_cache_path = args.metric_cache_path or os.path.join(
             os.environ["NAVSIM_EXP_ROOT"], "metric_cache_navtest"
         )
         try:
             metric_cache_loader = MetricCacheLoader(Path(metric_cache_path))
-            print(f"PDMS evaluation: ON ({len(metric_cache_loader)} cached tokens in {metric_cache_path})")
+            print(f"Metric cache: ON ({len(metric_cache_loader)} cached tokens in {metric_cache_path})")
         except Exception as exc:
-            print(f"  [warn] could not load metric cache at {metric_cache_path} ({exc}); skipping PDMS")
+            print(f"  [warn] could not load metric cache at {metric_cache_path} ({exc}); "
+                  "skipping PDMS/PDM-Closed trajectory")
 
     found = set(scene_loader.tokens)
     missing = [t for t in tokens if t not in found]
@@ -905,24 +977,40 @@ def main() -> None:
             fig, ax = plt.subplots(figsize=(8, 8))
             ax_pred = ax_gt = None
 
-        _, agent_trajectory = draw_bev_on_ax(ax, scene, agent, detailed=args.detailed)
+        metric_cache = (
+            load_metric_cache(metric_cache_loader, token)
+            if metric_cache_loader is not None else None
+        )
+        _, agent_trajectory, pdm_closed_trajectory = draw_bev_on_ax(
+            ax, scene, agent, detailed=args.detailed,
+            show_human=args.show_human, show_pdm_closed=args.show_pdm_closed,
+            metric_cache=metric_cache,
+        )
         pdms_result = None
-        if metric_cache_loader is not None:
-            pdms_result = evaluate_pdms(metric_cache_loader, token, agent_trajectory)
-            if pdms_result is not None:
-                draw_pdms_text_on_ax(ax, pdms_result)
-                print(f"  PDMS[{token}] = {pdms_result.score:.3f} "
-                      + " ".join(f"{label}={getattr(pdms_result, field):.2f}"
-                                 for label, field in PDMS_FIELDS))
+        if not args.no_pdms and metric_cache is not None:
+            pdms_result = evaluate_pdms(metric_cache, agent_trajectory)
+            draw_pdms_text_on_ax(ax, pdms_result)
+            print(f"  PDMS[{token}] = {pdms_result.score:.3f} "
+                  + " ".join(f"{label}={getattr(pdms_result, field):.2f}"
+                             for label, field in PDMS_FIELDS))
         agent_label = {"clapad": "CLAP-AD trajectory", "ltf": "LTF trajectory"}.get(
             args.agent, "Const-vel"
         )
         legend_handles = [
-            Line2D([0], [0], color=HUMAN_COLOR, lw=2, marker="o",
-                   markeredgecolor="black", label="Human (GT)"),
             Line2D([0], [0], color=TRAJ_COLOR, lw=2, marker="o",
                    markeredgecolor="black", label=agent_label),
         ]
+        if args.show_human:
+            legend_handles.insert(
+                0,
+                Line2D([0], [0], color=HUMAN_COLOR, lw=2, marker="o",
+                       markeredgecolor="black", label="Human (GT)"),
+            )
+        if pdm_closed_trajectory is not None:
+            legend_handles.append(
+                Line2D([0], [0], color=PDM_CLOSED_COLOR, lw=2, marker="o",
+                       markeredgecolor="black", label="PDM-Closed")
+            )
         if args.detailed:
             legend_handles.append(
                 Line2D([0], [0], color=DRIVABLE_AREA_COLOR, lw=1.5, ls="--",
@@ -933,11 +1021,18 @@ def main() -> None:
                        markersize=6, linestyle="none",
                        label="Agent LQR rollout (40 poses)")
             )
-            legend_handles.append(
-                Line2D([0], [0], color=HUMAN_LQR_BOX_COLOR, lw=1.0, marker="s",
-                       markersize=6, linestyle="none",
-                       label="Human LQR rollout (40 poses)")
-            )
+            if args.show_human:
+                legend_handles.append(
+                    Line2D([0], [0], color=HUMAN_LQR_BOX_COLOR, lw=1.0, marker="s",
+                           markersize=6, linestyle="none",
+                           label="Human LQR rollout (40 poses)")
+                )
+            if pdm_closed_trajectory is not None:
+                legend_handles.append(
+                    Line2D([0], [0], color=PDM_CLOSED_LQR_BOX_COLOR, lw=1.0, marker="s",
+                           markersize=6, linestyle="none",
+                           label="PDM-Closed LQR rollout (40 poses)")
+                )
         if is_clapad:
             current_speed, target_speed, pred_scores, gt_scores, speed_bins, pred_path = (
                 clapad_prediction(agent, scene)
