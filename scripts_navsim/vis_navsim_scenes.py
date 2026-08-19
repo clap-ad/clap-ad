@@ -103,6 +103,11 @@ V12_CKPT = (
     "/workspace/lead/outputs/local_training/TestByeaghajanzadeh_20260810_164007/model_0059.pth"
 )
 
+# Latent TFv6 (--agent ltf): predicts a plain route (no CLAP-AD speed-scoring
+# head), so it does NOT need the CLAP-AD legacy-config backfill and is
+# plotted without the CLAP-AD-specific overlays/score bars.
+LTF_CKPT = "/workspace/lead/outputs/checkpoints/ltfv6-navsim/model_0060.pth"
+
 DEFAULT_CKPT = V12_CKPT
 
 # token -> label. Mix of failure buckets (from the navtest CSV) and clean scenes.
@@ -164,13 +169,15 @@ def _apply_legacy_clapad_defaults(checkpoint: str) -> None:
 
 
 def build_agent(kind: str, checkpoint: str) -> AbstractAgent:
-    """Build the requested agent. 'cv' = constant velocity, 'clapad' = CLAP-AD."""
+    """Build the requested agent. 'cv' = constant velocity, 'clapad' = CLAP-AD,
+    'ltf' = latent TFv6 (plain route head, no CLAP-AD speed-scoring head)."""
     if kind == "cv":
         agent: AbstractAgent = ConstantVelocityAgent()
-    elif kind == "clapad":
+    elif kind in ("clapad", "ltf"):
         if os.path.isdir(checkpoint):
             checkpoint = os.path.join(checkpoint, "model_0060.pth")
-        _apply_legacy_clapad_defaults(checkpoint)
+        if kind == "clapad":
+            _apply_legacy_clapad_defaults(checkpoint)
         agent = CarlaTransfuserAgent(
             config=TransfuserConfig(), checkpoint_path=checkpoint
         )
@@ -702,13 +709,15 @@ def main() -> None:
     parser.add_argument(
         "--agent",
         default="clapad",
-        choices=["cv", "clapad"],
-        help="Agent whose trajectory is drawn on the BEV.",
+        choices=["cv", "clapad", "ltf"],
+        help="Agent whose trajectory is drawn on the BEV. 'ltf' = latent TFv6 "
+        "(plain 4s route, no CLAP-AD speed-scoring head/overlays).",
     )
     parser.add_argument(
         "--checkpoint",
-        default=DEFAULT_CKPT,
-        help="CLAP-AD checkpoint .pth (or its directory) for --agent clapad.",
+        default=None,
+        help="Checkpoint .pth (or its directory) for --agent clapad/ltf "
+        f"(default: {DEFAULT_CKPT!r} for clapad, {LTF_CKPT!r} for ltf).",
     )
     parser.add_argument(
         "--split",
@@ -770,6 +779,8 @@ def main() -> None:
         help="Output dir (default: /workspace/lead/outputs/navsim_viz/<timestamp>).",
     )
     args = parser.parse_args()
+    if args.checkpoint is None:
+        args.checkpoint = LTF_CKPT if args.agent == "ltf" else DEFAULT_CKPT
 
     if args.csv:
         token_labels = zero_score_tokens(args.csv)
@@ -903,7 +914,9 @@ def main() -> None:
                 print(f"  PDMS[{token}] = {pdms_result.score:.3f} "
                       + " ".join(f"{label}={getattr(pdms_result, field):.2f}"
                                  for label, field in PDMS_FIELDS))
-        agent_label = "CLAP-AD trajectory" if is_clapad else "Const-vel"
+        agent_label = {"clapad": "CLAP-AD trajectory", "ltf": "LTF trajectory"}.get(
+            args.agent, "Const-vel"
+        )
         legend_handles = [
             Line2D([0], [0], color=HUMAN_COLOR, lw=2, marker="o",
                    markeredgecolor="black", label="Human (GT)"),
