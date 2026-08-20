@@ -34,7 +34,7 @@ from shapely import affinity
 
 from nuplan.common.actor_state.state_representation import StateSE2
 from nuplan.common.actor_state.vehicle_parameters import get_pacifica_parameters
-from nuplan.common.actor_state.oriented_box import OrientedBox
+from nuplan.common.actor_state.car_footprint import CarFootprint
 from nuplan.common.maps.maps_datatypes import SemanticMapLayer
 from nuplan.planning.simulation.trajectory.trajectory_sampling import TrajectorySampling
 
@@ -507,8 +507,8 @@ def add_lqr_rollout_to_bev_ax(ax, scene, trajectory, box_config=LQR_BOX_CONFIG) 
 
     vehicle = get_pacifica_parameters()
     for x, y, heading in local_se2:
-        box = OrientedBox(StateSE2(x, y, heading), vehicle.length, vehicle.width, vehicle.height)
-        add_oriented_box_to_bev_ax(ax, box, box_config, add_heading=False)
+        footprint = CarFootprint.build_from_rear_axle(StateSE2(x, y, heading), vehicle)
+        add_oriented_box_to_bev_ax(ax, footprint.oriented_box, box_config, add_heading=False)
 
 
 # Ordered (label, PDMResults field) pairs for rendering PDMS subscores.
