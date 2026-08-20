@@ -135,7 +135,7 @@ class EgoStatus:
     ego_pose: npt.NDArray[np.float64]
     ego_velocity: npt.NDArray[np.float32]
     ego_acceleration: npt.NDArray[np.float32]
-    driving_command: npt.NDArray[np.int]
+    driving_command: npt.NDArray[np.int64]
     in_global_frame: bool = False  # False for AgentInput
 
 
