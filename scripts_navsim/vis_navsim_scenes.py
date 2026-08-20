@@ -151,11 +151,10 @@ def _apply_legacy_clapad_defaults(checkpoint: str) -> None:
     if "path_head_hidden_dim_multipliers" not in cfg:
         CarlaTrainingConfig.path_head_hidden_dim_multipliers = [2, 1]
 
-    if "speed_bins" not in cfg:
-        CarlaTrainingConfig.speed_bins = torch.tensor(
-            [0.0, 2.5, 5.0, 7.0, 8.5, 10.0, 12.0]
-        )
-        # CarlaTrainingConfig.speed_bins = torch.tensor([
+    if "target_speed_classes" not in cfg:
+        CarlaTrainingConfig.target_speed_classes = [0.0, 2.5, 5.0, 7.0, 8.5, 10.0, 12.0]
+        
+        # CarlaTrainingConfig.target_speed_classes = [
         #     0.0,
         #     2.77777778,
         #     5.55555556,
@@ -266,7 +265,7 @@ def clapad_prediction(agent: AbstractAgent, scene, threshold: float = 0.3):
     logits = output.pred_clapad["speed_logits"][0, 0]  # (M, S)
     scores = torch.sigmoid(logits.float()).cpu().numpy()  # (M, S)
     current_speed = float(torch.linalg.norm(features["status_feature"][:, 4:6]))
-    speed_bins = np.asarray(agent._carla_model_config.speed_bins, dtype=float)
+    speed_bins = np.asarray(agent._carla_model_config.target_speed_classes, dtype=float)
 
     coll = scores[0]
     valid = np.where(coll > threshold)[0]
@@ -893,9 +892,6 @@ def main() -> None:
 
     metric_cache_loader = None
     if not args.no_pdms or args.show_pdm_closed:
-        # metric_cache_path = args.metric_cache_path or os.path.join(
-        #     os.environ["NAVSIM_EXP_ROOT"], "metric_cache_navtest"
-        # )
         metric_cache_path = args.metric_cache_path or os.path.join(
             os.environ["NAVSIM_EXP_ROOT"], "metric_cache_navtest"
         )
