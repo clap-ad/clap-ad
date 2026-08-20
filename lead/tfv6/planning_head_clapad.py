@@ -197,6 +197,7 @@ class PlanningHeadClap(nn.Module):
         self.loss_speed = SpeedScoringLoss(
             speed_bins=speed_bins,
             crt_cfg_dict=self.config.speed_scoring_cfg_dict,
+            score_cfg=self.config.speed_scoring_loss_weights
         )
         
         self.traj_or_action = 'path_speed'  # 'traj' or 'action' or 'path_speed' or 'path_speed_wp'
@@ -621,7 +622,16 @@ class SpeedScoringLoss(nn.Module):
     These scores are relevant for speed prediction objectives.
     Model should learn the scoring function.
     """
-    def __init__(self, speed_bins, crt_cfg_dict):
+    def __init__(
+        self, 
+        speed_bins, 
+        crt_cfg_dict,
+        score_cfg={
+            "TTC_Score": 1.0,
+            "traffic_light": 0.2,
+            "stop_sign": 0.2,
+            "overtake": 0.2,
+        }):
         super(SpeedScoringLoss, self).__init__()
         self.speed_bins = speed_bins # list of speed bin edges to be scored
         self.num_classes = len(speed_bins)
@@ -651,16 +661,17 @@ class SpeedScoringLoss(nn.Module):
         self.ot_decel_min = self.ot_cfg.get('ot_decel_min', 2.5)  # score=1 when required decel <= this
         self.ot_decel_max = self.ot_cfg.get('ot_decel_max', 4.0)  # score=0 when required decel >= this
         
-        # Scores: NOTE: Do not change order of scores (without changing HydraSpeedHead output order)
-        self.score_cfg = {
-            "TTC_Score": 1.0,
-            "traffic_light": 0.2,
-            "stop_sign": 0.2,
-            "overtake": 0.2,
-            # "comfort_scores": 0.5,
-            # "feasibility_scores": 1.0,
-            # "speed_limit": 0.3,
-        }
+        # Scores: NOTE: Do not change order of scores (without changing CLAP-AD Head output order)
+        self.score_cfg = score_cfg
+        # self.score_cfg = {
+        #     "TTC_Score": 1.0,
+        #     "traffic_light": 0.2,
+        #     "stop_sign": 0.2,
+        #     "overtake": 0.2,
+        #     # "comfort_scores": 0.5,
+        #     # "feasibility_scores": 1.0,
+        #     # "speed_limit": 0.3,
+        # }
 
     def forward(self, curr_speed, path_pred, scores_pred, scene_score_info, path_pred_augmented=None, debug=False):
         """
@@ -780,15 +791,20 @@ class SpeedScoringLoss(nn.Module):
                 torch.ones_like(is_safe_scenario, dtype=gt.dtype) * 10
             )  # [B, K]
 
-            # BCE loss per sample and path, summed over S_CLS
-            kl = F.binary_cross_entropy_with_logits(pred, gt, reduction="none").sum(dim=-1)  # [B, K]
+            # BCE loss per sample and path, averaged over S_CLS so the scale
+            # matches a single BCE loss regardless of the number of speed bins
+            kl = F.binary_cross_entropy_with_logits(pred, gt, reduction="none").mean(dim=-1)  # [B, K]
             kl = kl * dynamic_sample_weight  # [B, K]
             loss_i = kl.mean()  # scalar: mean over batch and path
             weighted_loss = base_weight * loss_i
             losses[key] = weighted_loss # These are added to the dict to be tracked but only loss_speed_scores will be backpropagated not these separate losses
             total_loss += weighted_loss
 
-        losses["loss_speed_scores"] = total_loss # "loss" should be in the name if intended to be backpropagated
+        # Normalize by the sum of weights so the final loss stays on the scale
+        # of a single BCE loss (weighted average) instead of the sum of the
+        # (weighted) per-score BCE losses.
+        total_weight = sum(self.score_cfg.values())
+        losses["loss_speed_scores"] = total_loss / total_weight # "loss" should be in the name if intended to be backpropagated
         if debug:
             losses["raw_scores"] = raw_scores
 

@@ -832,6 +832,27 @@ class TrainingConfig(BaseConfig):
         }
 
     @property
+    def speed_scoring_loss_weights(self):
+        """Per-score loss weights for SpeedScoringLoss (CLAP-AD head).
+
+        NavSim only uses collision (TTC) scores, so the other scores
+        are disabled (weight 0) there.
+        """
+        if self.use_navsim_data:
+            return {
+                "TTC_Score": 1.0,
+                "traffic_light": 0.0,
+                "stop_sign": 0.0,
+                "overtake": 0.0,
+            }
+        return {
+            "TTC_Score": 1.0,
+            "traffic_light": 0.2,
+            "stop_sign": 0.2,
+            "overtake": 0.2,
+        }
+
+    @property
     def num_way_points_prediction(self):
         """Number of waypoints to predict."""
         if self.carla_leaderboard_mode:
@@ -1110,7 +1131,7 @@ class TrainingConfig(BaseConfig):
             weights["loss_target_speed"] = 0.0
 
         if self.use_clapad_head:
-            weights["loss_speed_scores"] = 0.2
+            weights["loss_speed_scores"] = 1.0
             weights["TTC_Score"] = 0.0
             weights["traffic_light"] = 0.0
             weights["stop_sign"] = 0.0
