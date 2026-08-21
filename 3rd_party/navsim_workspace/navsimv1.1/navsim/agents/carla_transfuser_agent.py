@@ -254,8 +254,6 @@ def traj_from_clapad(pred_clapad: dict, current_speed: float, speed_bins):
     to travel along the predicted path. The output is a tensor representing temporal trajectory
     """
 
-    # speed_bins = torch.tensor([0, 2.5, 5, 7, 8.5, 10, 12], dtype=torch.float32)
-
     path = pred_clapad["sdc_traj"][0].clone()          # (T, 2), 1m spacing
     logits = pred_clapad["speed_logits"][0,0] # (M, S)
     
@@ -273,13 +271,17 @@ def traj_from_clapad(pred_clapad: dict, current_speed: float, speed_bins):
     else:
         speed_bins_used = speed_bins
 
-    valid_idxs = (scores > 0.3).nonzero(as_tuple=True)[0]
+    valid_idxs = (scores > 0.8).nonzero(as_tuple=True)[0]
     if valid_idxs.numel() > 0:
         n = valid_idxs.numel()
         # If even, round up median to upper index
         median_idx = valid_idxs[(n - 1) // 2] if n % 2 == 1 else valid_idxs[n // 2]
-        # median_idx = valid_idxs[n // 2]
-        speed = speed_bins_used[median_idx].clamp(min=0.0)
+        # Use max valid speed instead of median
+        max_idx = valid_idxs[-1]  # Last index is the maximum
+        percentile_80_idx = valid_idxs[int(0.8 * (n - 1))]  # 80th percentile index
+        percentile_90_idx = valid_idxs[int(0.9 * (n - 1))]  # 90th percentile index
+        second_to_last_idx = valid_idxs[-2] if n > 2 else valid_idxs[-1]  # Second to last index
+        speed = speed_bins_used[percentile_80_idx]  # Use 80th percentile speed
     else:
         speed = speed_bins_used[0]  # default to lowest speed if no valid path
 
@@ -296,24 +298,48 @@ def traj_from_clapad(pred_clapad: dict, current_speed: float, speed_bins):
     dt = 0.5
     max_accel = 2.0   # m/s^2
     max_decel = 4.0   # m/s^2
+    num_steps = 8
     target_speed = speed.item()
-    speed_profile = [current_speed]
-    for _ in range(8):
 
-        current_v = speed_profile[-1]
+    def simulate_speed_profile(start_speed: float, ramp_target: float) -> List[float]:
+        profile = [start_speed]
+        for _ in range(num_steps):
+            current_v = profile[-1]
+            delta = ramp_target - current_v
+            # accelerate
+            if delta > 0:
+                next_v = current_v + min(delta, max_accel * dt)
+            # brake
+            else:
+                next_v = current_v - min(-delta, max_decel * dt)
+            next_v = max(next_v, 0.0)
+            profile.append(next_v)
+        return profile
 
-        delta = target_speed - current_v
+    def profile_distance(profile: List[float]) -> float:
+        return sum(0.5 * (profile[i] + profile[i + 1]) * dt for i in range(len(profile) - 1))
 
-        # accelerate
-        if delta > 0:
-            next_v = current_v + min(delta, max_accel * dt)
+    # Ramping current_speed -> target_speed and then holding at target_speed
+    # overshoots the distance a constant target_speed would cover over the
+    # trajectory horizon (e.g. 4 m/s over 4s implies at most 16m) whenever
+    # current_speed > target_speed, since speed stays above target_speed for
+    # the whole braking ramp. To avoid overshooting, find the largest
+    # "effective" ramp target (<= target_speed) whose resulting profile still
+    # respects the distance budget, so the vehicle keeps braking below
+    # target_speed by the end if that's what's needed to not overshoot.
+    total_time = num_steps * dt
+    distance_budget = target_speed * total_time
+    speed_profile = simulate_speed_profile(current_speed, target_speed)
+    if profile_distance(speed_profile) > distance_budget:
+        lo, hi = 0.0, target_speed
+        for _ in range(30):
+            mid = 0.5 * (lo + hi)
+            if profile_distance(simulate_speed_profile(current_speed, mid)) > distance_budget:
+                hi = mid
+            else:
+                lo = mid
+        speed_profile = simulate_speed_profile(current_speed, lo)
 
-        # brake
-        else:
-            next_v = current_v - min(-delta, max_decel * dt)
-
-        next_v = max(next_v, 0.0)
-        speed_profile.append(next_v)
     speed_profile = torch.tensor(
         speed_profile,
         device=path.device,
