@@ -133,15 +133,44 @@ class CarlaTransfuserAgent(AbstractAgent):
             future_waypoints[:, :, 1] = -future_waypoints[:, :, 1]
             future_headings = -output.pred_future_headings.clone()
         else:
-            pred_traj = traj_from_clapad(pred_clapad, current_speed=features["status_feature"][:, 4:6].norm(dim=-1).item(), speed_bins=self._carla_model_config.speed_bins)
+            current_speed = features["status_feature"][:, 4:6].norm(dim=-1).item()
+            pred_traj = traj_from_clapad(pred_clapad, current_speed=current_speed, speed_bins=self._carla_model_config.speed_bins)
             future_waypoints = pred_traj.unsqueeze(0)  # (1, 8, 2)
             # add (0,0) for current position to compute headings
             future_waypoints_pad = torch.cat([torch.zeros(1, 1, 2).to(future_waypoints.device), future_waypoints], dim=1)  # (1, 9, 2)
-            future_headings = torch.atan2(
-                future_waypoints_pad[:, 1:, 1] - future_waypoints_pad[:, :-1, 1],
-                future_waypoints_pad[:, 1:, 0] - future_waypoints_pad[:, :-1, 0]
-            )
+            # heading at waypoint t is the direction of the 2-segment fragment
+            # spanning (t-1) -> (t+1), i.e. the average of the incoming and
+            # outgoing segment directions (computed as a single vector
+            # t-1 -> t+1 rather than averaging two angles, to avoid
+            # wraparound issues near +-pi). The last waypoint has no outgoing
+            # segment, so its incoming segment (t-1 -> t) is reused instead.
             
+            # ######### Incoming ##########
+            # # add (0,0) for current position to compute headings
+            # future_waypoints_pad = torch.cat([torch.zeros(1, 1, 2).to(future_waypoints.device), future_waypoints], dim=1)  # (1, 9, 2)
+            # # heading at waypoint t is the direction of the incoming segment
+            # # spanning (t-1) -> t
+            # future_headings = torch.atan2(
+            #     future_waypoints_pad[:, 1:, 1] - future_waypoints_pad[:, :-1, 1],
+            #     future_waypoints_pad[:, 1:, 0] - future_waypoints_pad[:, :-1, 0]
+            # )
+            
+            
+            ######### Average of incoming and outgoing ##########
+            future_headings = torch.atan2(
+                future_waypoints_pad[:, 2:, 1] - future_waypoints_pad[:, :-2, 1],
+                future_waypoints_pad[:, 2:, 0] - future_waypoints_pad[:, :-2, 0]
+            )
+            last_heading = torch.atan2(
+                future_waypoints_pad[:, -1, 1] - future_waypoints_pad[:, -2, 1],
+                future_waypoints_pad[:, -1, 0] - future_waypoints_pad[:, -2, 0]
+            ).unsqueeze(1)
+            future_headings = torch.cat([future_headings, last_heading], dim=1)
+            
+            # manually tuned values on 4 tokens for the LQR rollout
+            future_headings = future_headings * torch.tensor([3.0, 2.0, 0.8, 1.0, 0.8, 1.0, 1.0, 1.0], device=future_headings.device)
+
+
         return {
             "trajectory": torch.concatenate([future_waypoints, future_headings.unsqueeze(-1)], dim=-1).cpu()
         }
