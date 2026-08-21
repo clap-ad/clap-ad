@@ -44,6 +44,7 @@ from py123d.geometry.transform.transform_se2 import convert_relative_to_absolute
 # ---------------------------------------------------------------------------
 _RAW_LOG_FRAMES_CACHE: "OrderedDict[str, Any]" = OrderedDict()
 _RAW_LOG_CACHE_MAXSIZE = 8  # bound memory during full-split caching
+_FUTURE_MODE = "raw_log"  # "const_vel"  # "raw_log" or "const_vel" for scene_info future positions
 
 
 def _load_raw_log_frames(log_name: str):
@@ -68,6 +69,40 @@ def _yaw_from_quaternion(quat) -> float:
     """Yaw (rad) from a [w, x, y, z] quaternion."""
     w, x, y, z = quat
     return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def _raw_future_annotations(scene, count: int):
+    """Future (boxes, names, track_tokens, ego_pose) tuples per frame, read straight from
+    the raw OpenScene log rather than the truncated scene window. This lets agent future
+    positions be looked up directly instead of falling back to a constant-velocity guess
+    when the requested horizon exceeds ``scene.frames``. Returns ``None`` if the raw log
+    is unavailable, in which case callers should fall back to the windowed scene frames.
+    """
+    frames = _load_raw_log_frames(scene.scene_metadata.log_name)
+    if not frames:
+        return None
+    cur_token = scene.scene_metadata.initial_token
+    idx = next((k for k, f in enumerate(frames) if f["token"] == cur_token), None)
+    if idx is None:
+        return None
+
+    future = []
+    for f in frames[idx + 1: idx + 1 + count]:
+        anns = f["anns"]
+        ego_pose = np.array(
+            [
+                f["ego2global_translation"][0],
+                f["ego2global_translation"][1],
+                _yaw_from_quaternion(f["ego2global_rotation"]),
+            ],
+            dtype=np.float64,
+        )
+        # timestamp (microseconds) so callers can compute the REAL elapsed time
+        # of each future sample instead of assuming a fixed cadence -- frames
+        # are ~0.5s apart but not exactly, and the raw log can also have gaps
+        # (dropped frames), see ``get_scene_score_info_from_scene``.
+        future.append((anns["gt_boxes"], anns["gt_names"], anns["track_tokens"], ego_pose, f["timestamp"]))
+    return future
 
 
 def _full_future_global_poses(scene):
@@ -228,7 +263,7 @@ class TransfuserTargetBuilder(AbstractTargetBuilder):
             sampling_distance=1.0,
             max_points=self._config.num_route_points_prediction,
         )
-        scene_info = get_scene_score_info_from_scene(scene)
+        scene_info = get_scene_score_info_from_scene(scene, future_mode=_FUTURE_MODE)
 
         return {
             "trajectory": trajectory,
@@ -473,9 +508,19 @@ class TransfuserTargetBuilder(AbstractTargetBuilder):
             ),
         )
         
-def get_scene_score_info_from_scene(scene) -> list[dict]:
+def get_scene_score_info_from_scene(scene, future_mode: str = "const_vel") -> list[dict]:
     """
     Extracts agent bounding boxes and their future waypoints for scene scoring.
+
+    :param future_mode: how per-agent future positions are obtained:
+        - "auto" (default): prefer the raw open-loop log (real recorded motion),
+          falling back to the windowed ``scene.frames`` if the log is unavailable.
+          Matches the original/backward-compatible behavior.
+        - "raw_log": always use the raw log (raises if it cannot be resolved).
+        - "window": always use the windowed ``scene.frames``, never the raw log.
+        - "const_vel": ignore all future frames and always extrapolate every
+          agent's future position with constant velocity. Useful to reproduce/
+          inspect the legacy assumption this feature replaces.
     Returns a list of dicts, each containing:
         - type: str
         - p_o_x, p_o_y: current position
@@ -487,6 +532,7 @@ def get_scene_score_info_from_scene(scene) -> list[dict]:
         - fut_wp_invalid: bool
         - corners: (4, 2) array of bbox corners
     """
+    assert future_mode in ("auto", "raw_log", "window", "const_vel"), f"Unknown future_mode: {future_mode}"
     num_poses = 8
     
     frame_idx = scene.scene_metadata.num_history_frames - 1
@@ -500,9 +546,28 @@ def get_scene_score_info_from_scene(scene) -> list[dict]:
     widths = [box[BoundingBoxIndex.WIDTH] for box in boxes]
     ttc_time_horizon = 4 # seconds
 
-    # Prepare future frames
-    future_frames = scene.frames[frame_idx + 1 : frame_idx + 1 + num_poses]
+    # Prefer the FULL open-loop log for future agent poses (real recorded motion,
+    # not a constant-velocity assumption) since NAVSIM predicts one path for the
+    # whole 4s horizon rather than re-planning every 0.05s like closed-loop. Falls
+    # back to the windowed scene frames if the raw log isn't available.
+    if future_mode == "const_vel":
+        future_frames = scene.frames[frame_idx + 1 : frame_idx + 1 + num_poses]
+        using_raw_log = False
+    else:
+        raw_future = _raw_future_annotations(scene, num_poses) if future_mode != "window" else None
+        if raw_future is None and future_mode == "raw_log":
+            raise RuntimeError("future_mode='raw_log' requested but the raw log could not be resolved")
+        if raw_future is not None:
+            future_frames = raw_future
+            using_raw_log = True
+        else:
+            future_frames = scene.frames[frame_idx + 1 : frame_idx + 1 + num_poses]
+            using_raw_log = False
     start_ego_pos = scene.frames[frame_idx].ego_status.ego_pose[:3] #x,y,angle
+    # Current-frame timestamp (microseconds), used to compute each future
+    # sample's REAL elapsed time below (frames are only ~0.5s apart on
+    # average, not exactly, and can have gaps/dropped detections).
+    cur_timestamp = scene.frames[frame_idx].timestamp
 
     scene_score_info = []
     for idx, (box, name, track_token, velocity, yaw, l, w) in enumerate(zip(boxes, names, track_tokens, velocities, headings, lengths, widths)):
@@ -513,34 +578,54 @@ def get_scene_score_info_from_scene(scene) -> list[dict]:
         x, y = box[BoundingBoxIndex.X], box[BoundingBoxIndex.Y]
         vx, vy = velocity[0], velocity[1]
 
-        # Gather future waypoints for this agent
+        # Gather future waypoints for this agent, paired with each sample's
+        # REAL elapsed time (seconds since the current frame) so the spline
+        # below is anchored correctly regardless of frame cadence/gaps. In
+        # "const_vel" mode we deliberately skip reading ANY future frame data
+        # (raw log or window) so the legacy constant-velocity extrapolation
+        # below is always exercised, matching this mode's docstring ("ignore
+        # all future frames and always extrapolate ..."). Previously this loop
+        # still ran over `future_frames` in const_vel mode (identical to
+        # "window"), silently making const_vel behave like window/raw_log
+        # whenever the scene had enough future frames -- fixed here.
         fut_wp = []
-        for future_frame in future_frames:
-            future_annotations = future_frame.annotations
-            ego_fut_pos = future_frame.ego_status.ego_pose[:3] #x,y,angle
-            for f_box, f_name, f_token in zip(future_annotations.boxes, future_annotations.names, future_annotations.track_tokens):
-                if f_name == "vehicle" and f_token == track_token:
-                    agent_fut_pos = f_box[:3]
-                    
-                    # --- Step 1: agent pose in FUTURE EGO frame ---
-                    agent_fut_relative = f_box[:3]
-
-                    # --- Step 2: convert to GLOBAL frame ---
-                    agent_global = convert_relative_to_absolute_se2_array(
-                        ego_fut_pos,
-                        agent_fut_relative
+        fut_dt = []
+        if future_mode != "const_vel":
+            for future_frame in future_frames:
+                if using_raw_log:
+                    f_boxes, f_names, f_tokens, ego_fut_pos, f_timestamp = future_frame
+                else:
+                    future_annotations = future_frame.annotations
+                    f_boxes, f_names, f_tokens = (
+                        future_annotations.boxes,
+                        future_annotations.names,
+                        future_annotations.track_tokens,
                     )
+                    ego_fut_pos = future_frame.ego_status.ego_pose[:3]  # x,y,angle
+                    f_timestamp = future_frame.timestamp
+                for f_box, f_name, f_token in zip(f_boxes, f_names, f_tokens):
+                    if f_name == "vehicle" and f_token == track_token:
+                        # --- Step 1: agent pose in FUTURE EGO frame ---
+                        agent_fut_relative = f_box[:3]
 
-                    # --- Step 3: convert GLOBAL → CURRENT EGO frame ---
-                    agent_relative_now = convert_absolute_to_relative_se2_array(
-                        StateSE2(*start_ego_pos),
-                        agent_global
-                    )[0]
+                        # --- Step 2: convert to GLOBAL frame ---
+                        agent_global = convert_relative_to_absolute_se2_array(
+                            ego_fut_pos,
+                            agent_fut_relative
+                        )
 
-                    fut_wp.append(agent_relative_now[:2]) # x,y,angle
-                    break  # Only one match per frame
+                        # --- Step 3: convert GLOBAL → CURRENT EGO frame ---
+                        agent_relative_now = convert_absolute_to_relative_se2_array(
+                            StateSE2(*start_ego_pos),
+                            agent_global
+                        )[0]
+
+                        fut_wp.append(agent_relative_now[:2]) # x,y,angle
+                        fut_dt.append((f_timestamp - cur_timestamp) / 1e6)  # microseconds -> seconds
+                        break  # Only one match per frame
 
         fut_wp = np.array(fut_wp)
+        fut_dt = np.array(fut_dt)
         # Future position (constant velocity fallback if no waypoints)
         if len(fut_wp) > 0:
             p_fut = fut_wp[-1]
@@ -549,17 +634,31 @@ def get_scene_score_info_from_scene(scene) -> list[dict]:
             v_ego_y = np.sin(yaw) * vx + np.cos(yaw) * vy
             p_fut = np.array([x + v_ego_x * ttc_time_horizon, y + v_ego_y * ttc_time_horizon])
 
-        # Upsample waypoints if possible
+        # Upsample waypoints if possible. Anchor the spline at the agent's
+        # CURRENT position (t=0), not just its future samples, and use each
+        # sample's REAL elapsed time (``fut_dt``) rather than assuming a fixed
+        # cadence spanning exactly [0, ttc_time_horizon]. Previously
+        # ``t_old = np.linspace(0, ttc_time_horizon, len(fut_wp))`` silently
+        # assumed the first collected future sample was at t=0 and the last
+        # was at exactly t=4.0s, which is wrong: the first sample is really
+        # ~0.5s out (frame cadence) and the last sample can land at whatever
+        # time the raw log / window actually provides. That squeezed all
+        # future motion earlier than it really happens, making e.g. the first
+        # upsampled waypoint (nominally "t=0.1s") actually show where the
+        # agent will be around real t~=0.5s -- a multi-meter error for fast
+        # agents, which is exactly the "first point is further ahead" pattern
+        # seen when visualizing.
         new_hz = 10
         old_hz = 2
         if len(fut_wp) < int(old_hz * ttc_time_horizon):
             fut_wp_ups = np.zeros((int(new_hz * ttc_time_horizon), 2))
             fut_wp_invalid = True
         else:
-            t_old = np.linspace(0, ttc_time_horizon, len(fut_wp))
-            t_new = np.linspace(0, ttc_time_horizon, int(new_hz * ttc_time_horizon))
-            cs_x = CubicSpline(t_old, fut_wp[:, 0])
-            cs_y = CubicSpline(t_old, fut_wp[:, 1])
+            t_old = np.concatenate(([0.0], fut_dt))
+            wp_old = np.concatenate(([[x, y]], fut_wp), axis=0)
+            t_new = np.linspace(0, ttc_time_horizon, int(new_hz * ttc_time_horizon) + 1)[1:]
+            cs_x = CubicSpline(t_old, wp_old[:, 0])
+            cs_y = CubicSpline(t_old, wp_old[:, 1])
             x_new = cs_x(t_new)
             y_new = cs_y(t_new)
             fut_wp_ups = np.stack([x_new, y_new], axis=1)
@@ -623,7 +722,14 @@ def get_traffic_rules(scene, frame_idx):
     
     return traffic_rules
 
-def vis(scene):
+def vis(scene, tag="", future_mode: str = "auto"):
+    """Render BEV/camera/scene-score-info debug plots for ``scene`` into a
+    timestamped folder. ``tag`` is an optional suffix (e.g. "raw_log" vs
+    "const_vel") to tell apart multiple runs of the same scene. ``future_mode``
+    is forwarded to ``get_scene_score_info_from_scene`` to control how agent
+    future positions are obtained (see its docstring); defaults preserve
+    backward-compatible behavior.
+    """
     folder_path = "/workspace/temp_vis/navsim"
     # check exist or create it
     import os
@@ -636,6 +742,7 @@ def vis(scene):
     print(f"Visualization directory: {os.path.abspath(vis_folder)}")
     os.chdir(vis_folder)
     import matplotlib.pyplot as plt
+    suffix = f"_{tag}" if tag else ""
     frame_idx = scene.scene_metadata.num_history_frames - 1 # current frame
     
     
@@ -644,14 +751,15 @@ def vis(scene):
     agent = ConstantVelocityAgent()
     fig, ax = plot_bev_with_agent(scene, agent)
     plt.show()
-    plt.savefig("bev_vis_agent.png")
+    plt.savefig(f"bev_vis_agent{suffix}.png")
     from navsim.visualization.plots import plot_cameras_frame
     fig, ax = plot_cameras_frame(scene, frame_idx)
     plt.show()
-    plt.savefig("cameras_vis.png")
+    plt.savefig(f"cameras_vis{suffix}.png")
     
     # Scene_score_info
-    scene_score_info = get_scene_score_info_from_scene(scene)
+    scene_score_info = get_scene_score_info_from_scene(scene, future_mode=future_mode)
+
     figsize=(10, 10)
     fig, ax = plt.subplots(figsize=figsize)
     colors = plt.cm.get_cmap('tab10', len(scene_score_info))
@@ -680,11 +788,73 @@ def vis(scene):
     ax.set_aspect('equal')
     ax.set_xlabel('X')
     ax.set_ylabel('Y')
-    ax.set_title('Scene Score Info Visualization')
+    ax.set_title(f'Scene Score Info Visualization{suffix}')
     ax.legend()
     plt.show()
-    plt.savefig("Scene score info.png")
-    
+    plt.savefig(f"Scene score info{suffix}.png")
+    return vis_folder
+
+
+def main():
+    """Load one or more scenes and render ``vis()`` twice per scene: once using
+    real future agent positions from the raw open-loop log (``future_mode=
+    "raw_log"``), once using the legacy constant-velocity extrapolation
+    (``future_mode="const_vel"``), so the two can be compared side by side to
+    sanity-check correctness.
+    """
+    import argparse
+    from pathlib import Path
+
+    from navsim.common.dataclasses import SceneFilter, SensorConfig
+    from navsim.common.dataloader import SceneLoader
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--split", default="test", help="OpenScene split folder name")
+    parser.add_argument(
+        "--tokens", nargs="+", default=None, help="Scene tokens to visualize (space-separated)"
+    )
+    parser.add_argument(
+        "--num-scenes", type=int, default=1, help="Number of scenes to sample when --tokens is not given"
+    )
+    args = parser.parse_args()
+
+    data_root = Path(os.environ["OPENSCENE_DATA_ROOT"])
+    data_path = data_root / "navsim_logs" / args.split
+    sensor_blobs_path = data_root / "sensor_blobs" / args.split
+
+    scene_filter = SceneFilter(
+        num_history_frames=4,
+        num_future_frames=10,
+        frame_interval=1,
+        has_route=True,
+        max_scenes=args.num_scenes if args.tokens is None else None,
+        log_names=None,
+        tokens=args.tokens,
+    )
+    scene_loader = SceneLoader(
+        data_path=data_path,
+        sensor_blobs_path=sensor_blobs_path,
+        scene_filter=scene_filter,
+        sensor_config=SensorConfig.build_all_sensors(include=[3]),
+    )
+    tokens = args.tokens or list(scene_loader.tokens)
+    print(f"Visualizing {len(tokens)} token(s): {tokens}")
+
+    for token in tokens:
+        print(f"Visualizing token={token}")
+        scene = scene_loader.get_scene_from_token(token)
+
+        # Case 1: real future agent positions read straight from the raw log.
+        vis(scene, tag=f"{token}_raw_log", future_mode="raw_log")
+
+        # Case 2: legacy constant-velocity extrapolation from current velocity.
+        vis(scene, tag=f"{token}_const_vel", future_mode="const_vel")
+
+
+if __name__ == "__main__":
+    main()
+
+
 
 class BoundingBox2DIndex(IntEnum):
     """Intenum for bounding boxes in TransFuser."""
