@@ -202,8 +202,7 @@ def vis(idx, agent, base_vis_path, scene, pdm_result):
     # Middle: Bar plot of predicted scores per speed bin
     if pred_score is not None:
         ax_score = plt.subplot(gs[1])
-        speed_bins = torch.tensor([0, 2.5, 5, 7, 8.5, 10, 12], dtype=torch.float32)
-        x = speed_bins.numpy()
+        x = np.arange(len(pred_score))
         ax_score.bar(x, pred_score, width=0.8, align='center', color='skyblue', edgecolor='k')
         ax_score.set_xticks(x)
         ax_score.set_xlabel("Speed Bin Edge (m/s)")
@@ -230,6 +229,126 @@ def vis(idx, agent, base_vis_path, scene, pdm_result):
     plt.savefig(os.path.join(base_vis_path, f"traj_and_scores_{idx}.png"))
     plt.show()
     plt.close("all")
+
+    # Additional visualization of the raw model predictions (BEV semantic + bounding boxes)
+    visualize_model_predictions(idx, agent, base_vis_path, scene)
+
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from navsim.visualization.plots import plot_bev_with_agent
+
+
+def visualize_model_predictions(idx, agent, base_vis_path, scene):
+    """Visualize the model's raw NavSim BEV semantic segmentation and bounding box
+    predictions (as produced directly by the network, before any CLAP/trajectory
+    post-processing) next to the scene's birds-eye-view for reference.
+    """
+    carla_inference = getattr(agent, "_carla_open_loop_inference", None)
+    if carla_inference is None or not getattr(carla_inference, "predictions", None):
+        return
+
+    # Use the first ensemble member's raw prediction for visualization.
+    pred = carla_inference.predictions[0]
+    config = agent._carla_model_config
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 8))
+
+    # Left: scene BEV (map + human/agent trajectory) for reference.
+    scene_fig, scene_ax = plot_bev_with_agent(scene, agent)
+    scene_fig.canvas.draw()
+    scene_img = np.frombuffer(scene_fig.canvas.buffer_rgba(), dtype=np.uint8)
+    scene_img = scene_img.reshape(scene_fig.canvas.get_width_height()[::-1] + (4,))
+    axes[0].imshow(scene_img)
+    axes[0].set_title("Scene BEV (map + GT/agent trajectory)", fontsize=12, pad=10)
+    axes[0].axis("off")
+    plt.close(scene_fig)
+
+    # Right: model's raw NavSim BEV semantic segmentation + bounding box predictions.
+    ax = axes[1]
+    bev_classes = None
+    class_names = {
+        0: "Unlabeled",
+        1: "Road",
+        2: "Walkways",
+        3: "Centerline",
+        4: "Static Objects",
+        5: "Vehicles",
+        6: "Pedestrians",
+    }
+    color_map = {
+        0: (0, 0, 0),
+        1: (250, 250, 250),
+        2: (180, 180, 180),
+        3: (255, 255, 0),
+        4: (255, 0, 0),
+        5: (15, 60, 255),
+        6: (0, 255, 0),
+    }
+
+    if getattr(pred, "pred_bev_semantic_navsim", None) is not None:
+        bev_classes = pred.pred_bev_semantic_navsim[0].detach().argmax(0).cpu().numpy()
+        rgb_img = np.zeros((*bev_classes.shape, 3), dtype=np.uint8)
+        for cls_idx, color in color_map.items():
+            rgb_img[bev_classes == cls_idx] = color
+        ax.imshow(rgb_img, origin="lower")
+
+    if getattr(pred, "pred_bounding_box_navsim", None) is not None:
+        boxes = pred.pred_bounding_box_navsim.pred_bounding_box_vehicle_system
+        if len(boxes) > 0:
+            boxes = boxes[0]  # (K, 9): x, y, w, h, yaw, velocity, brake, class, score
+            pixels_per_meter = config.pixels_per_meter
+            min_x = config.min_x_meter
+            min_y = config.min_y_meter
+            for box in boxes:
+                x, y, box_w, box_h, yaw = box[0], box[1], box[2], box[3], box[4]
+                px = (x - min_x) * pixels_per_meter
+                py = (y - min_y) * pixels_per_meter
+                pw = box_w * pixels_per_meter
+                ph = box_h * pixels_per_meter
+                rect = patches.Rectangle(
+                    (px - pw / 2, py - ph / 2),
+                    pw,
+                    ph,
+                    angle=np.degrees(yaw),
+                    rotation_point="center",
+                    linewidth=1.5,
+                    edgecolor="red",
+                    facecolor="none",
+                )
+                ax.add_patch(rect)
+
+    # Legend explaining BEV semantic class colors (+ predicted bounding boxes)
+    legend_handles = [
+        patches.Patch(facecolor=np.array(color) / 255.0, edgecolor="black", label=class_names[cls_idx])
+        for cls_idx, color in color_map.items()
+    ]
+    legend_handles.append(
+        patches.Patch(facecolor="none", edgecolor="red", linewidth=1.5, label="Predicted Bounding Box")
+    )
+
+    leg = ax.legend(
+        handles=legend_handles,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.08),
+        ncol=4,
+        fontsize=9,
+        frameon=True,
+    )
+
+    ax.set_title("Model Predicted BEV Semantic + Bounding Boxes", fontsize=12, pad=10)
+    ax.axis("off")
+
+    # Save with tight bounding box to recalculate boundaries and include external legend/titles
+    plt.savefig(
+        os.path.join(base_vis_path, f"model_predictions_{idx}.png"),
+        bbox_inches="tight",
+        bbox_extra_artists=[leg],
+        dpi=150,
+    )
+    plt.close(fig)
+
 
 # cast to the camera 
 def get_pixels(scene, agent, cam='front', human=False):

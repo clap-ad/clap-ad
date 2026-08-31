@@ -173,3 +173,50 @@ def save_runner_reports(reports: List[RunnerReport], output_dir: Path, report_na
     save_path = output_dir / report_name
     df.to_parquet(safe_path_to_string(save_path))
     logger.info(f"Saved runner reports to {save_path}")
+
+def print_worst_k_tokens(results_path, criteria: str, k: int = 10) -> List[str]:
+    """
+    Load a pdm scoring results file (.csv or .xlsx) and print the worst-K scene tokens
+    according to the given criteria column, formatted as a Python list for easy copy-paste
+    (e.g. into the `tokens_to_evaluate` override list in `run_pdm_score` for debugging).
+    :param results_path: path to the results file produced by `run_pdm_score` (csv or excel).
+    :param criteria: column name to sort by, e.g. "no_at_fault_collisions", "score", etc.
+    :param k: number of worst tokens to print.
+    :return: list of the worst-K tokens (ascending by criteria value).
+    """
+    results_path = Path(results_path)
+    if results_path.suffix.lower() in (".xlsx", ".xls"):
+        df = pd.read_excel(results_path)
+    else:
+        df = pd.read_csv(results_path)
+
+    if criteria not in df.columns:
+        raise ValueError(f"Criteria '{criteria}' not found in columns: {list(df.columns)}")
+
+    df = df[df["token"] != "average"]
+    if "valid" in df.columns:
+        df = df[df["valid"].astype(bool)]
+
+    worst_df = df.sort_values(by=criteria, ascending=True).head(k)
+    worst_tokens = worst_df["token"].tolist()
+
+    print(f"Worst {k} tokens by '{criteria}':")
+    for token, value in zip(worst_tokens, worst_df[criteria].tolist()):
+        print(f"    # {criteria}={value}")
+    print("worst_tokens = [")
+    for token in worst_tokens:
+        print(f'    "{token}",')
+    print("]")
+
+    return worst_tokens
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Print worst-K tokens from pdm scoring results.")
+    parser.add_argument("results_path", type=str, help="Path to the results file (.csv or .xlsx).")
+    parser.add_argument("criteria", type=str, help="Column name to sort by (e.g., 'no_at_fault_collisions').")
+    parser.add_argument("--k", type=int, default=10, help="Number of worst tokens to print (default: 10).")
+
+    args = parser.parse_args()
+    print_worst_k_tokens(args.results_path, args.criteria, args.k)
