@@ -2,6 +2,7 @@
 
 import cProfile
 import io
+import json
 import logging
 import numbers
 import pstats
@@ -59,6 +60,9 @@ class Expert(ExpertData):
 
         # Initialize scenario sorter (will be configured with route in _init)
         self.scenario_sorter = ScenarioSorter()
+
+        # Per-step vehicle kinematics, written to metric_info.json
+        self.metric_info = {}
 
         if self.config_expert.profile_expert:
             self.profiler = cProfile.Profile()
@@ -161,6 +165,13 @@ class Expert(ExpertData):
         ):
             if self.save_path is not None and self.config_expert.datagen:
                 self.save_sensors(input_data)
+
+        # Save per-step metric info (vehicle kinematics) to metric_info.json
+        if self.save_path is not None:
+            self.metric_info[self.step] = self.get_metric_info()
+            with open(self.save_path / "metric_info.json", "w") as outfile:
+                json.dump(self.metric_info, outfile, indent=4)
+
         if self.step % self.config_expert.log_info_freq == 0:
             elapsed_time = time.time() - start_time
             LOG.info(f"Step: {self.step}, Time per step: {elapsed_time * 1000:.2f} ms")

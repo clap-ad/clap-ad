@@ -157,6 +157,30 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
         self.infraction_recorder.set_scenario(scenario)
         LOG.info("[SensorAgent] Scenario reference set for infraction tracking")
 
+    def get_metric_info(self) -> dict:
+        """Collect per-step vehicle metrics for Bench2Drive's metric_info.json.
+
+        Mirrors the format used by Bench2Drive's own agents so downstream
+        tooling (e.g. utils_base/plot_control.py) can parse this file.
+        """
+
+        def vector2list(vector, rotation=False):
+            if rotation:
+                return [vector.roll, vector.pitch, vector.yaw]
+            return [vector.x, vector.y, vector.z]
+
+        transform = self._vehicle.get_transform()
+        return {
+            "acceleration": vector2list(self._vehicle.get_acceleration()),
+            "angular_velocity": vector2list(self._vehicle.get_angular_velocity()),
+            "velocity": vector2list(self._vehicle.get_velocity()),
+            "speed": self._vehicle.get_velocity().length(),
+            "forward_vector": vector2list(transform.get_forward_vector()),
+            "right_vector": vector2list(transform.get_right_vector()),
+            "location": vector2list(transform.location),
+            "rotation": vector2list(transform.rotation, rotation=True),
+        }
+
     def _init(self):
         # Get the hero vehicle and the CARLA world
         self._vehicle: carla.Actor = CarlaDataProvider.get_hero_actor()
@@ -667,8 +691,8 @@ class SensorAgent(BaseAgent, autonomous_agent.AutonomousAgent):
                 self.video_recorder.save_debug_video_frame(image)
                 self.video_recorder.save_debug_image(image)
 
-        # Save metric info if in Bench2Drive mode
-        if self.config_closed_loop.is_bench2drive and hasattr(self, "get_metric_info"):
+        # Save per-step metric info (vehicle kinematics) to metric_info.json
+        if hasattr(self, "get_metric_info"):
             metric = self.get_metric_info()
             self.metric_info[self.step] = metric
             with open(

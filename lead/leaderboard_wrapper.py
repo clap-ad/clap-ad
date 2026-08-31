@@ -381,6 +381,7 @@ class LeaderboardWrapper:
             else "0",
             "OUTPUT_DIR": str(resolved_output_dir),
             "EVALUATION_OUTPUT_DIR": str(resolved_output_dir),
+            "TRAFFIC_MANAGER_SEED": str(self.args.traffic_manager_seed),
         }
 
         # Add agent mode specific variables

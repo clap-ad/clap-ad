@@ -6,7 +6,6 @@ import logging
 import os
 import pathlib
 import queue
-import random
 import threading
 from collections import deque
 
@@ -212,11 +211,12 @@ class ExpertData(ExpertBase):
             self.config_expert.weather_jpeg_compression_quality[self.weather_setting]
         )  # key value: quality maps to probability
         if self.config_expert.jpeg_compression:
+            quality_keys = list(jpeg_storage_quality_distribution.keys())
+            quality_probs = list(jpeg_storage_quality_distribution.values())
             self.jpeg_storage_quality = int(
-                np.random.choice(
-                    list(jpeg_storage_quality_distribution.keys()),
-                    p=list(jpeg_storage_quality_distribution.values()),
-                ),
+                quality_keys[
+                    self.expert_rng.choice(len(quality_keys), p=quality_probs)
+                ],
             )
         else:
             self.jpeg_storage_quality = 90
@@ -290,9 +290,10 @@ class ExpertData(ExpertBase):
                 self.weather_setting = "ClearNoon"
                 LOG.info(f"Chose nice weather {self.weather_setting}")
             else:
-                self.weather_setting = random.choice(
-                    list(weathers.WEATHER_SETTINGS.keys()),
-                )
+                weather_keys = list(weathers.WEATHER_SETTINGS.keys())
+                self.weather_setting = weather_keys[
+                    self.expert_rng.integers(len(weather_keys))
+                ]
                 LOG.info(f"Chose random weather {self.weather_setting}")
             LOG.info(f"Chose weather {self.weather_setting}")
             self.weather_parameters: dict[str, float] = weathers.WEATHER_SETTINGS[
@@ -300,29 +301,35 @@ class ExpertData(ExpertBase):
             ]
 
             if "Noon" in self.weather_setting:
-                self.weather_parameters["sun_altitude_angle"] += np.random.uniform(
+                self.weather_parameters["sun_altitude_angle"] += self.expert_rng.uniform(
                     -45.0,
                     45.0,
                 )
             elif "Custom" not in self.weather_setting:
-                self.weather_parameters["sun_altitude_angle"] += np.random.uniform(
+                self.weather_parameters["sun_altitude_angle"] += self.expert_rng.uniform(
                     -15.0,
                     15.0,
                 )
 
             for randomizing_parameter in ["wind_intensity", "fog_density", "wetness"]:
                 if self.weather_parameters[randomizing_parameter] < 30:
-                    self.weather_parameters[randomizing_parameter] += np.random.uniform(
+                    self.weather_parameters[
+                        randomizing_parameter
+                    ] += self.expert_rng.uniform(
                         -5.0,
                         5.0,
                     )
                 elif self.weather_parameters[randomizing_parameter] < 80:
-                    self.weather_parameters[randomizing_parameter] += np.random.uniform(
+                    self.weather_parameters[
+                        randomizing_parameter
+                    ] += self.expert_rng.uniform(
                         -10.0,
                         10.0,
                     )
                 else:
-                    self.weather_parameters[randomizing_parameter] += np.random.uniform(
+                    self.weather_parameters[
+                        randomizing_parameter
+                    ] += self.expert_rng.uniform(
                         -5.0,
                         5.0,
                     )

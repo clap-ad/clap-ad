@@ -218,7 +218,7 @@ class ClosedLoopConfig(OpenLoopConfig):
     @property
     def is_bench2drive(self):
         """Check if running in Bench2Drive environment."""
-        return bool(os.getenv("IS_BENCH2DRIVE", "False"))
+        return os.getenv("IS_BENCH2DRIVE", "0") == "1"
 
     @property
     def is_bench2drive_speed(self):

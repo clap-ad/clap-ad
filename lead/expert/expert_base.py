@@ -3,6 +3,7 @@
 import logging
 import os
 import pathlib
+import zlib
 from functools import cached_property
 
 import carla
@@ -61,6 +62,21 @@ class ExpertBase(BaseAgent, autonomous_agent_local.AutonomousAgent):
         self.ego_vehicle: carla.Actor = CarlaDataProvider.get_hero_actor()
         self.carla_world: carla.World = self.ego_vehicle.get_world()
         self.carla_world_map: carla.Map = CarlaDataProvider.get_map()
+
+        # Deterministic, route-scoped RNG for expert-side randomization (e.g.
+        # weather shuffling). Using a dedicated Generator instead of the
+        # shared global `random`/`np.random` state makes this fully
+        # reproducible regardless of how many other RNG draws happen
+        # upstream (traffic manager spawning, scenario randomization, etc.)
+        # before this agent runs.
+        # Note: builtin hash() is randomized per-process (PYTHONHASHSEED)
+        # unless explicitly disabled, so we use a stable hash (zlib.crc32)
+        # here to keep the seed reproducible across runs/processes.
+        tm_seed = int(os.environ.get("TRAFFIC_MANAGER_SEED", "0"))
+        route_salt = zlib.crc32(f"{route_index}_{self.town}".encode("utf-8"))
+        self.expert_rng = np.random.default_rng(
+            (tm_seed + route_salt) % (2**32),
+        )
 
     @beartype
     def expert_init(self, hd_map: carla.Map | None):
@@ -269,6 +285,30 @@ class ExpertBase(BaseAgent, autonomous_agent_local.AutonomousAgent):
     @cached_property
     def rep(self):
         return os.environ.get("REPETITION", "-1")
+
+    def get_metric_info(self) -> dict:
+        """Collect per-step vehicle metrics for metric_info.json.
+
+        Mirrors the format used by Bench2Drive's own agents so downstream
+        tooling (e.g. utils_base/plot_control.py) can parse this file.
+        """
+
+        def vector2list(vector, rotation=False):
+            if rotation:
+                return [vector.roll, vector.pitch, vector.yaw]
+            return [vector.x, vector.y, vector.z]
+
+        transform = self.ego_vehicle.get_transform()
+        return {
+            "acceleration": vector2list(self.ego_vehicle.get_acceleration()),
+            "angular_velocity": vector2list(self.ego_vehicle.get_angular_velocity()),
+            "velocity": vector2list(self.ego_vehicle.get_velocity()),
+            "speed": self.ego_vehicle.get_velocity().length(),
+            "forward_vector": vector2list(transform.get_forward_vector()),
+            "right_vector": vector2list(transform.get_right_vector()),
+            "location": vector2list(transform.location),
+            "rotation": vector2list(transform.rotation, rotation=True),
+        }
 
     @step_cached_property
     @beartype
