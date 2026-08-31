@@ -5,6 +5,11 @@
 # raw-log future) directly in each target, so training uses it as GT without
 # masking or per-sample resampling.
 #
+# NOTE: this builds the *legacy* cache: //4 camera downsize, JPEG quality 30,
+# and a +/-32 m BEV/LiDAR extent. For a higher-quality-image / wider-BEV
+# variant (recommended for better curb/road-geometry adherence with a 48 m
+# path horizon), use scripts_navsim/build_navsim_cache_hq_wide_bev.sh instead.
+#
 # Usage:
 #   scripts_clapad/build_navsim_cache.sh                     # navtrain (default)
 #   SPLIT=navmini scripts_clapad/build_navsim_cache.sh       # quick validation

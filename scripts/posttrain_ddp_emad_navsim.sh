@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Set which GPUs to use (comma-separated, e.g., "0,1,2,3")
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-4,5,6,7}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-2,3}
 
 export OMP_NUM_THREADS=$(nproc)
 export OPENBLAS_NUM_THREADS=1 # Shuts off numpy multithreading, to avoid threads spawning other threads.
@@ -23,19 +23,26 @@ export PYTHON=/workspace/lead/.venv/bin/python
 export USER_NAME="eaghajanzadeh"
 
 echo "Using GPUs: $CUDA_VISIBLE_DEVICES for training"
+#     load_file=/workspace/lead/outputs/local_training/TestByeaghajanzadeh_20260722_084623_navsim_stage1_fixed_regnet/model_0060.pth \
 
 export LEAD_TRAINING_CONFIG=" use_planning_decoder=true \
-    load_file=/workspace/lead/outputs/local_training/TestByeaghajanzadeh_20260506_155115_navsim_stage_1/model_0060.pth \
+    load_file=/workspace/lead/outputs/local_training/TestByeaghajanzadeh_20260825_115732_resnet_stage1_30e_LIDAR/model_0029.pth \
     use_navsim_data=true \
     use_carla_data=false \
-    LTF=true \
+    LTF=false \
     use_clapad_head=true \
-    navsim_data_root=/workspace/lead/3rd_party/navsim_workspace/exp/exp_clap \
+    navsim_data_root=/workspace/lead/3rd_party/navsim_workspace/exp/training_cache \
     debug_mode=false \
     num_route_points_smoothing=50 \
     num_route_points_prediction=48 \
-    ttc_time_horizon=2.0 \
-    epochs=61"
+    ttc_time_horizon=4.0 \
+    ttc_coll_radius=0.5 \
+    ttc_safe_distance=1.0 \
+    target_first_distance=1.0 \
+    use_fde_loss=true \
+    lr=1e-4 \
+    epochs=90 \
+    batch_size=64"
 
 python -m torch.distributed.run \
     --standalone \

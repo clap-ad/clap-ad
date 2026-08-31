@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Set which GPUs to use (comma-separated, e.g., "0,1,2,3")
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-4,5,6,7}
 
 export OMP_NUM_THREADS=$(nproc)
 export OPENBLAS_NUM_THREADS=1 # Shuts off numpy multithreading, to avoid threads spawning other threads.
@@ -26,12 +26,18 @@ echo "Using GPUs: $CUDA_VISIBLE_DEVICES for training"
 
 export LEAD_TRAINING_CONFIG=" use_planning_decoder=false \
     use_navsim_data=true \
-    use_carla_data=false \
+    use_carla_data=true \
     LTF=true \
     use_clapad_head=false \
-    navsim_data_root=/workspace/lead/3rd_party/navsim_workspace/exp/exp_org \
+    navsim_data_root=/workspace/lead/3rd_party/navsim_workspace/exp/training_cache \
     debug_mode=false \
-    epochs=61"
+    epochs=30 \
+    image_architecture=resnet34 \
+    lidar_architecture=resnet34 \
+    batch_size=64 \
+    carla_num_samples=103288 \
+    navsim_num_samples=103288 \
+    use_persistent_cache=false "
 
 uv run python -m torch.distributed.run \
     --standalone \
