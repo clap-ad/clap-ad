@@ -88,7 +88,25 @@ class CARLAData(Dataset):
             list(constants.SIM2REAL_BEV_OCCUPANCY_CLASS_CONVERTER.values()),
         )
 
-        self.bucket_collection = self.config.carla_bucket_collection(root, config)
+        if self.build_buckets:
+            # This CARLAData instance is being constructed *by* a bucket collection
+            # (e.g. NavSimBucketCollection/WaymoBucketCollection._build_buckets()) in
+            # order to iterate over the raw frames and populate its own buckets. Using
+            # `config.carla_bucket_collection` here would resolve back to that very same
+            # bucket collection class (since use_carla_data/use_navsim_data etc. are
+            # unchanged), recreating it and recursing infinitely. That infinite
+            # recursion is what eventually surfaces as a confusing RecursionError deep
+            # inside unrelated code (e.g. imgaug's isinstance/ABC checks in
+            # image_augmenter()). Instead, use a simple flat "load everything" bucket
+            # collection to enumerate all raw frames without any additional
+            # filtering/mixing logic.
+            from lead.data_buckets.full_pretrain_bucket_collection import (
+                FullPretrainBucketCollection,
+            )
+
+            self.bucket_collection = FullPretrainBucketCollection(root, config)
+        else:
+            self.bucket_collection = self.config.carla_bucket_collection(root, config)
         self.shuffle(0)
         if self.rank == 0:
             LOG.info(f"All routes: {self.bucket_collection.total_routes}")

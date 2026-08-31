@@ -84,11 +84,31 @@ class TrainingConfig(BaseConfig):
     # How many pixels make up 1 meter in BEV grids.
     pixels_per_meter = 4.0
 
+    # --- NAVSIM BEV extent overrides ---
+    # By default the NAVSIM (non-leaderboard, non-Waymo) planning area is a
+    # +/-32 m square, which is too small to cover a 48 m path prediction
+    # horizon (the path can run off the back edge of the BEV before the model
+    # ever "sees" it coming). These four fields let a JSON training config
+    # widen the NAVSIM BEV extent (e.g. to +/-48 m) without touching the
+    # CARLA-leaderboard or Waymo E2E extents. Defaults are ``None``, which
+    # means "use the legacy -32/32 values" -- i.e. this is fully backward
+    # compatible with existing configs/checkpoints that don't set these.
+    # NOTE: if you change these, the NAVSIM cache must be rebuilt with
+    # matching ``lidar_min_x/max_x/min_y/max_y`` + ``bev_pixel_*`` overrides
+    # (see scripts_navsim/build_navsim_cache_wide_bev.sh), otherwise the
+    # cached bounding boxes / BEV semantic map won't align with this extent.
+    navsim_min_x_meter: float = None
+    navsim_max_x_meter: float = None
+    navsim_min_y_meter: float = None
+    navsim_max_y_meter: float = None
+
     @property
     def min_x_meter(self):
         """Back boundary of the planning area in meters."""
         if self.target_dataset == TargetDataset.WAYMO_E2E_2025_3CAMERAS:
             return 0
+        if self.navsim_min_x_meter is not None:
+            return self.navsim_min_x_meter
         return -32
 
     @property
@@ -98,6 +118,8 @@ class TrainingConfig(BaseConfig):
             return 64
         if self.target_dataset == TargetDataset.WAYMO_E2E_2025_3CAMERAS:
             return 64
+        if self.navsim_max_x_meter is not None:
+            return self.navsim_max_x_meter
         return 32
 
     @property
@@ -105,6 +127,8 @@ class TrainingConfig(BaseConfig):
         """Left boundary of the planning area in meters."""
         if self.carla_leaderboard_mode:
             return -40
+        if self.navsim_min_y_meter is not None:
+            return self.navsim_min_y_meter
         return -32
 
     @property
@@ -112,6 +136,8 @@ class TrainingConfig(BaseConfig):
         """Right boundary of the planning area in meters."""
         if self.carla_leaderboard_mode:
             return 40
+        if self.navsim_max_y_meter is not None:
+            return self.navsim_max_y_meter
         return 32
 
     @property
@@ -717,15 +743,15 @@ class TrainingConfig(BaseConfig):
         (see `training_utils.save_config`).
         """
         # Values used for CLAP-AD ECCV/NAVSIM
-        return [
-            0.0,
-            2.5,
-            5.0,
-            7.0,
-            8.5,
-            10.0,
-            12.0,
-        ]
+        # return [
+        #     0.0,
+        #     2.5,
+        #     5.0,
+        #     7.0,
+        #     8.5,
+        #     10.0,
+        #     12.0,
+        # ]
         
         # Values used for CLAP-AD B2D-Speed
         # return [
@@ -746,15 +772,13 @@ class TrainingConfig(BaseConfig):
         
         # Values used in TFv6
         # return [
-        #     0.0,
-        #     4.0,
-        #     8.0,
-        #     10.0,
-        #     13.88888888,
-        #     16.0,
-        #     17.77777777,
-        #     20.0,
+        #     0,1,2,3,4,5,6
         # ]
+        
+        # Values used in WACV submission
+        return [
+            0,1,2,3,4,5,6,7,8,9,10,11,12
+        ]
 
     @property
     def target_speeds(self):
@@ -1004,6 +1028,11 @@ class TrainingConfig(BaseConfig):
     # If true use NavSim data for training.
     use_navsim_data = False
     # NavSim data root directory.
+    # For the higher-quality-image / wider-BEV cache built by
+    # scripts_navsim/build_navsim_cache_hq_wide_bev.sh, point this at
+    # e.g. "3rd_party/navsim_workspace/exp/navsim_training_cache_hq_wide_bev/navtrain"
+    # AND set navsim_min_x_meter/navsim_max_x_meter/navsim_min_y_meter/
+    # navsim_max_y_meter (e.g. to -48/48/-48/48) to match the cache's extent.
     navsim_data_root = "data/navsim_training_cache/navtrain"
     # Size of NavSim data portion in mixed data training. -1 = use all data.
     navsim_num_samples = -1

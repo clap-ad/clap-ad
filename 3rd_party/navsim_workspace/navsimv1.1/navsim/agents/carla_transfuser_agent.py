@@ -111,6 +111,35 @@ class CarlaTransfuserAgent(AbstractAgent):
         """Inherited, see superclass."""
         return [TransfuserFeatureBuilder(config=self._config)]
 
+    def _get_rasterized_lidar(self, features: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        Build the "rasterized_lidar" tensor expected by TransfuserBackbone.forward
+        when config.LTF=False, from the raw "lidar_feature" produced by
+        TransfuserFeatureBuilder._get_lidar_feature (a (C, X, Y) float BEV
+        histogram, uncompressed -- unlike camera_feature this is not
+        JPEG-encoded, so no cv2.imdecode is needed here).
+
+        Mirrors the fix applied to lead.data_loader.navsim_dataset.NavsimData
+        for the training-time cache: NAVSIM's splat_points() does NOT
+        transpose its histogram (unlike CARLA's rasterize_lidar, which
+        explicitly returns `overhead_splat.T`), so the array needs its last
+        two axes swapped ((..., X, Y) -> (..., H, W)), followed by the same
+        90-degree rotation used elsewhere ("Align NavSim BEV with CARLA BEV")
+        so this matches the orientation/frame the model was trained on.
+
+        NOTE: unlike a raw compute_features() output, `features` here has
+        already gone through AbstractAgent.compute_trajectory()'s
+        `{k: v.unsqueeze(0) for k, v in features.items()}`, so
+        "lidar_feature" arrives as (1, C, X, Y), not (C, X, Y).
+        """
+        lidar_feature: torch.Tensor = features["lidar_feature"]
+        lidar_feature = lidar_feature.numpy()
+        if lidar_feature.ndim == 3:
+            lidar_feature = lidar_feature[:, None]  # add channel dim -> (B, 1, X, Y)
+        rasterized_lidar = np.swapaxes(lidar_feature, -2, -1)  # (B, C, X, Y) -> (B, C, H, W)
+        rasterized_lidar = np.rot90(rasterized_lidar, 1, axes=(-2, -1)).copy()
+        return torch.tensor(rasterized_lidar).float()  # (B, C, H, W)
+
     def forward(self, features: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """Inherited, see superclass."""
         
@@ -120,12 +149,15 @@ class CarlaTransfuserAgent(AbstractAgent):
         rgb = np.transpose(rgb, (2, 0, 1))  # HWC to CHW
         rgb = torch.tensor(rgb).unsqueeze(0).float()  # CHW to NCHW
         
-        output: CarlaOpenLoopPrediction = self._carla_open_loop_inference.forward({
+        forward_data = {
             "rgb": rgb,
             "command": features["status_feature"][:, :4].reshape(-1, 4),
             "speed": torch.linalg.norm(features["status_feature"][:, 4:6]).reshape(-1, 1),
             "acceleration": torch.linalg.norm(features["status_feature"][:, 6:8]).reshape(-1, 1),
-        })
+        }
+        if not self._carla_model_config.LTF:
+            forward_data["rasterized_lidar"] = self._get_rasterized_lidar(features)
+        output: CarlaOpenLoopPrediction = self._carla_open_loop_inference.forward(forward_data)
         pred_clapad = output.pred_clapad
         if pred_clapad is None:
             future_waypoints = output.pred_future_waypoints.clone()
@@ -199,12 +231,15 @@ class CarlaTransfuserAgent(AbstractAgent):
         rgb = np.transpose(rgb, (2, 0, 1))  # HWC to CHW
         rgb = torch.tensor(rgb).unsqueeze(0).float()  # CHW to NCHW
         
-        output: CarlaOpenLoopPrediction = self._carla_open_loop_inference.forward({
+        forward_data = {
             "rgb": rgb,
             "command": features["status_feature"][:, :4].reshape(-1, 4),
             "speed": torch.linalg.norm(features["status_feature"][:, 4:6]).reshape(-1, 1),
             "acceleration": torch.linalg.norm(features["status_feature"][:, 6:8]).reshape(-1, 1),
-        })
+        }
+        if not self._carla_model_config.LTF:
+            forward_data["rasterized_lidar"] = self._get_rasterized_lidar(features)
+        output: CarlaOpenLoopPrediction = self._carla_open_loop_inference.forward(forward_data)
         pred_clapad = output.pred_clapad
         if pred_clapad is None:
             return None, None

@@ -142,6 +142,39 @@ class NavsimData(Dataset):
         rgb = cv2.imdecode(camera_feature, cv2.IMREAD_COLOR)
         rgb = np.transpose(rgb, (2, 0, 1))  # HWC to CHW
 
+        # Real LiDAR BEV histogram, cached by NAVSIM's
+        # TransfuserFeatureBuilder._get_lidar_feature (see
+        # navsimv1.1/navsim/agents/transfuser/transfuser_features.py). Only
+        # needed when config.LTF=False (TransfuserBackbone then expects
+        # data["rasterized_lidar"] instead of the LTF dummy positional
+        # encoding); building it unconditionally here is cheap and keeps
+        # LTF=True/False switchable without re-caching.
+        lidar_feature = feature.get("lidar_feature", None)
+        if lidar_feature is not None:
+            if isinstance(lidar_feature, torch.Tensor):
+                lidar_feature = lidar_feature.numpy()
+            lidar_feature = np.asarray(lidar_feature, dtype=np.float32)
+            if lidar_feature.ndim == 2:
+                lidar_feature = lidar_feature[None]  # add channel dim -> (1, X, Y)
+            # NAVSIM's splat_points() does NOT transpose its histogram (unlike
+            # CARLA's rasterize_lidar, which explicitly returns
+            # `overhead_splat.T`), so the cached array is (C, X, Y) i.e.
+            # (channel, width, height) instead of LEAD's (C, H, W) convention.
+            # Swap the last two axes, then apply the same 90-degree rotation
+            # used for navsim_bev_semantic ("Align NavSim BEV with CARLA BEV")
+            # so this raster shares the same orientation/frame as the other
+            # NAVSIM BEV targets.
+            rasterized_lidar = np.transpose(lidar_feature, (0, 2, 1))
+            rasterized_lidar = np.rot90(rasterized_lidar, 1, axes=(-2, -1)).copy()
+        else:
+            # Older caches built before lidar_feature support: fall back to an
+            # all-zero raster so LTF=False doesn't crash (though results will
+            # be meaningless -- rebuild the cache to get real LiDAR).
+            rasterized_lidar = np.zeros(
+                (1, self.config.lidar_height_pixel, self.config.lidar_width_pixel),
+                dtype=np.float32,
+            )
+
         agent_states = target["agent_states"]
         agent_labels = target["agent_labels"]
         trajectory = target["trajectory"]
@@ -214,6 +247,7 @@ class NavsimData(Dataset):
             "route": path,
             "route_mask": path_mask,
             "scene_score_info": scene_score_info,
+            "rasterized_lidar": rasterized_lidar,
         }
         if self.config.detect_boxes:
             self._convert_navsim_bb_to_carla(agent_states, agent_labels, data)
