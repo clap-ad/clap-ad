@@ -8,6 +8,7 @@ Usage:
         --splits test trainval --out outputs/navsim_ego_speed
 """
 import argparse
+import os
 import pickle
 from pathlib import Path
 
@@ -17,9 +18,13 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# Defaults to <repo>/3rd_party/navsim_workspace/dataset/navsim_logs, or
+# $OPENSCENE_DATA_ROOT/navsim_logs if that environment variable is set (see
+# scripts_navsim/navsim_env.sh).
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 DATASET_ROOT = Path(
-    "/workspace/lead/3rd_party/navsim_workspace/dataset/navsim_logs"
-)
+    os.environ.get("OPENSCENE_DATA_ROOT", _REPO_ROOT / "3rd_party/navsim_workspace/dataset")
+) / "navsim_logs"
 
 
 def collect_speeds(split_dir: Path) -> np.ndarray:

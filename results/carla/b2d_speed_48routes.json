@@ -1,0 +1,36 @@
+{
+  "$schema_note": "Result summary transcribed from the CLAP-AD paper (Table 2: Bench2Drive-Speed results on 48 routes). Not raw simulator logs -- see docs/setup for reproducing with `--bench2drive-speed` and data/benchmark_routes/b2dspd_eval48.xml.",
+  "benchmark": "Bench2Drive-Speed",
+  "num_routes": 48,
+  "metrics": {
+    "speed_adherence_all": "Speed-Adherence (SA) score averaged over all routes, 0-100. Measures how closely realized speed tracks the requested speed.",
+    "speed_adherence_easy": "SA on the Easy difficulty split.",
+    "speed_adherence_medium": "SA on the Medium difficulty split.",
+    "speed_adherence_hard": "SA on the Hard difficulty split.",
+    "efficiency": "Bench2Drive Efficiency metric.",
+    "driving_score": "Bench2Drive Driving Score (DS), 0-100.",
+    "success_rate_pct": "Route success rate in percent.",
+    "delta_speed_adherence_all": "SA change relative to the method's own backbone (null if not applicable).",
+    "delta_driving_score": "DS change relative to the method's own backbone (null if not applicable)."
+  },
+  "methods": [
+    {"method": "TCP-Speed", "speed_adherence_all": 69.23, "speed_adherence_easy": 76.18, "speed_adherence_medium": 68.71, "speed_adherence_hard": 62.81, "efficiency": 169.84, "driving_score": 29.66, "success_rate_pct": 18.75,
+      "note": "Baseline reference from the Bench2Drive-Speed paper; vendored TCP code under 3rd_party/Bench2Drive-Speed is CC BY-NC-ND 4.0, not used by CLAP-AD."},
+    {"method": "Hydra-Next", "speed_adherence_all": 68.53, "speed_adherence_easy": 68.68, "speed_adherence_medium": 67.94, "speed_adherence_hard": 68.96, "efficiency": 157.05, "driving_score": 69.87, "success_rate_pct": 39.58},
+    {"method": "SparseDriveV2", "speed_adherence_all": 51.13, "speed_adherence_easy": 52.50, "speed_adherence_medium": 49.72, "speed_adherence_hard": 51.18, "efficiency": 91.77, "driving_score": 94.63, "success_rate_pct": 60.41},
+    {"method": "UniAD", "speed_adherence_all": 54.22, "speed_adherence_easy": 56.14, "speed_adherence_medium": 52.62, "speed_adherence_hard": 53.90, "efficiency": 108.49, "driving_score": 18.90, "success_rate_pct": 4.16,
+      "note": "Backbone lives in the separately-licensed Bench2DriveZoo repo (CC BY-NC-ND 4.0); not shipped in this repository."},
+    {"method": "UniAD + CLAP-AD (ours)", "speed_adherence_all": 79.41, "speed_adherence_easy": 83.83, "speed_adherence_medium": 75.40, "speed_adherence_hard": 79.00, "efficiency": 170.03, "driving_score": 75.15, "success_rate_pct": 41.67,
+      "delta_speed_adherence_all": 25.2, "delta_driving_score": 56.3,
+      "note": "Code/checkpoint not released in this repo -- built on Bench2DriveZoo (CC BY-NC-ND 4.0)."},
+    {"method": "VAD", "speed_adherence_all": 61.63, "speed_adherence_easy": 64.64, "speed_adherence_medium": 62.60, "speed_adherence_hard": 57.66, "efficiency": 130.53, "driving_score": 40.23, "success_rate_pct": 20.83,
+      "note": "Backbone lives in the separately-licensed Bench2DriveZoo repo (CC BY-NC-ND 4.0); not shipped in this repository."},
+    {"method": "VAD + CLAP-AD (ours)", "speed_adherence_all": 75.51, "speed_adherence_easy": 80.42, "speed_adherence_medium": 72.05, "speed_adherence_hard": 74.07, "efficiency": 159.48, "driving_score": 90.52, "success_rate_pct": 52.08,
+      "delta_speed_adherence_all": 13.9, "delta_driving_score": 50.3,
+      "note": "Code/checkpoint not released in this repo -- built on Bench2DriveZoo (CC BY-NC-ND 4.0)."},
+    {"method": "TFv6", "speed_adherence_all": 69.64, "speed_adherence_easy": 70.75, "speed_adherence_medium": 68.30, "speed_adherence_hard": 69.86, "efficiency": 154.58, "driving_score": 92.59, "success_rate_pct": 58.33},
+    {"method": "TFv6 + CLAP-AD (ours)", "speed_adherence_all": 82.53, "speed_adherence_easy": 89.79, "speed_adherence_medium": 76.81, "speed_adherence_hard": 80.98, "efficiency": 187.80, "driving_score": 88.47, "success_rate_pct": 50.00,
+      "delta_speed_adherence_all": 12.9, "delta_driving_score": -4.1,
+      "checkpoint": "https://huggingface.co/thomasschwarzfischer/clap-ad/tree/main/tfv6"}
+  ]
+}

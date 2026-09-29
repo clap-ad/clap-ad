@@ -16,8 +16,8 @@
 
 set -euo pipefail
 
-# --- Paths (edit PROJECT_DIR if the repo lives elsewhere) -------------------
-PROJECT_DIR=/workspace/lead
+# --- Paths (override PROJECT_DIR if the repo lives elsewhere) ---------------
+PROJECT_DIR="${LEAD_PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)}"
 NAVSIM_ROOT="${PROJECT_DIR}/3rd_party/navsim_workspace"
 DEVKIT="${NAVSIM_ROOT}/navsimv1.1"
 VENV_PY="${DEVKIT}/venv/bin/python"

@@ -1217,10 +1217,15 @@ class TrainingConfig(BaseConfig):
 
     @overridable_property
     def log_clearml(self):
-        """If true log metrics to ClearML."""
-        if self.debug_mode:
-            return False
-        return True
+        """If true log metrics to ClearML.
+
+        Requires the internal ``utils_base`` package (not published in this
+        repository) -- see ``lead/training/logger.py::setup_clearml``.
+        Defaults to False so training runs out-of-the-box without it; set
+        ``LEAD_TRAINING_CONFIG="log_clearml=true"`` if you have that package
+        available.
+        """
+        return False
 
     # --- Hardware configuration ---
     @property

@@ -8,12 +8,15 @@ renders
   * ``plot_bev_with_agent``                 -> BEV map with GT (human) trajectory
                                                and a ConstantVelocity baseline
 
-Env required (already set in this workspace):
+Env required (set by `source scripts_navsim/navsim_env.sh`):
   OPENSCENE_DATA_ROOT, NUPLAN_MAPS_ROOT, NUPLAN_MAP_VERSION
 
-Run (from the navsim venv):
-  cd /workspace/lead/3rd_party/navsim_workspace/navsimv1.1
-  ./venv/bin/python /workspace/lead/scripts_clapad/vis_navsim_scenes.py
+Run (from the repo root, with the NAVSIM venv activated):
+  source scripts_navsim/navsim_env.sh
+  python scripts_navsim/vis_navsim_scenes.py
+
+Or via the launcher, which sets up the environment for you:
+  scripts_navsim/run_vis_navsim.sh
 """
 
 from __future__ import annotations
@@ -69,50 +72,17 @@ from navsim.visualization.config import TRAJECTORY_CONFIG
 # (used both for the --detailed LQR rollout overlay and for real PDMS scoring).
 PROPOSAL_SAMPLING = TrajectorySampling(num_poses=40, interval_length=0.1)
 
-V4_CKPT = (
-    "/data/datasets/AD_datasets/Bench2Drive-ckpts/thomas/clapad/navsim/"
-    "TestByeaghajanzadeh_20260506_155115_v4/model_0060.pth"
-)
-
-V5_CKPT = (
-    "/data/datasets/AD_datasets/Bench2Drive-ckpts/thomas/clapad/navsim/"
-    "TestByeaghajanzadeh_20260722_084623/model_0060.pth"
-)
-
-V6_CKPT = (
-    "/data/datasets/AD_datasets/Bench2Drive-ckpts/thomas/clapad/navsim/"
-    "TestByeaghajanzadeh_20260722_084623_v3/model_0060.pth"
-)
-
-V7_CKPT = (
-    "/data/datasets/AD_datasets/Bench2Drive-ckpts/thomas/clapad/navsim/"
-    "TestByeaghajanzadeh_20260722_084623_v7/model_0037.pth"
-)
-
-V8_CKPT = (
-    "/data/datasets/AD_datasets/Bench2Drive-ckpts/thomas/clapad/navsim/"
-    "TestByeaghajanzadeh_20260722_084623_v8/model_0060.pth"
-)
-
-OVERFIT_CKPT = (
-    "/workspace/lead/outputs/local_training/navsim_overfit_eaghajanzadeh_20260804_192203/model_0113.pth"
-)
-
-V9_CKPT = (
-    "/data/datasets/AD_datasets/Bench2Drive-ckpts/thomas/clapad/navsim/"
-    "TestByeaghajanzadeh_20260805_094518/model_0060.pth"
-)
-
-V12_CKPT = (
-    "/workspace/lead/outputs/local_training/TestByeaghajanzadeh_20260810_164007/model_0059.pth"
-)
+# Default CLAP-AD NAVSIM checkpoint. Override with --checkpoint, or point this
+# at your own trained checkpoint (see scripts_navsim/posttrain_clapad_navsim.sh)
+# or a downloaded release checkpoint (see the NAVSIM README).
+CLAPAD_CKPT = "outputs/checkpoints/clapad_navsim/model_final.pth"
 
 # Latent TFv6 (--agent ltf): predicts a plain route (no CLAP-AD speed-scoring
 # head), so it does NOT need the CLAP-AD legacy-config backfill and is
 # plotted without the CLAP-AD-specific overlays/score bars.
-LTF_CKPT = "/workspace/lead/outputs/checkpoints/ltfv6-navsim/model_0060.pth"
+LTF_CKPT = "outputs/checkpoints/ltfv6_navsim/model_final.pth"
 
-DEFAULT_CKPT = V12_CKPT
+DEFAULT_CKPT = CLAPAD_CKPT
 
 # token -> label. Mix of failure buckets (from the navtest CSV) and clean scenes.
 DEFAULT_TOKENS = {

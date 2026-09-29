@@ -1,0 +1,46 @@
+{
+  "$schema_note": "Result summary transcribed from the CLAP-AD paper (Table 1: Closed-loop results on the 220 Bench2Drive routes). Not raw simulator logs -- see docs/setup for reproducing these numbers with scripts/eval_clapad_b2d.sh / scripts/eval_bench2drive.sh.",
+  "benchmark": "Bench2Drive",
+  "num_routes": 220,
+  "metrics": {
+    "ctrl": "Whether the method supports a user-specified test-time speed request.",
+    "driving_score": "Official Bench2Drive Driving Score (DS), 0-100.",
+    "delta_driving_score": "DS change relative to the method's own backbone (null if not applicable/reported).",
+    "success_rate_pct": "Route success rate in percent."
+  },
+  "groups": [
+    {
+      "expert": "Bench2Drive-base data (Think2Drive expert, reinforcement-learned)",
+      "methods": [
+        {"method": "SparseDrive (re-impl. from MomAD)", "ctrl": false, "driving_score": 44.54, "delta_driving_score": null, "success_rate_pct": 16.71},
+        {"method": "GenAD", "ctrl": false, "driving_score": 44.81, "delta_driving_score": null, "success_rate_pct": 15.90},
+        {"method": "MomAD", "ctrl": false, "driving_score": 47.91, "delta_driving_score": null, "success_rate_pct": 18.11},
+        {"method": "DiFSD", "ctrl": false, "driving_score": 52.02, "delta_driving_score": null, "success_rate_pct": 21.00},
+        {"method": "Hydra-MDP", "ctrl": false, "driving_score": 59.95, "delta_driving_score": null, "success_rate_pct": 29.82},
+        {"method": "DiffAD", "ctrl": false, "driving_score": 67.92, "delta_driving_score": null, "success_rate_pct": 38.64},
+        {"method": "Hydra-Next", "ctrl": false, "driving_score": 73.86, "delta_driving_score": null, "success_rate_pct": 50.00},
+        {"method": "HiP-AD", "ctrl": false, "driving_score": 86.77, "delta_driving_score": null, "success_rate_pct": 69.09},
+        {"method": "AlignDrive", "ctrl": false, "driving_score": 89.07, "delta_driving_score": null, "success_rate_pct": 73.18},
+        {"method": "SparseDriveV2", "ctrl": false, "driving_score": 89.15, "delta_driving_score": null, "success_rate_pct": 70.00},
+        {"method": "UniAD", "ctrl": false, "driving_score": 45.81, "delta_driving_score": null, "success_rate_pct": 16.36,
+          "note": "Backbone lives in the separately-licensed Bench2DriveZoo repo (CC BY-NC-ND 4.0); not shipped in this repository. See LICENSE / third-party notices."},
+        {"method": "UniAD + CLAP-AD (ours)", "ctrl": true, "driving_score": 74.29, "delta_driving_score": 28.5, "success_rate_pct": 49.09,
+          "note": "Code/checkpoint not released in this repo -- built on Bench2DriveZoo (CC BY-NC-ND 4.0), see LICENSE / third-party notices."},
+        {"method": "VAD", "ctrl": false, "driving_score": 42.35, "delta_driving_score": null, "success_rate_pct": 15.00,
+          "note": "Backbone lives in the separately-licensed Bench2DriveZoo repo (CC BY-NC-ND 4.0); not shipped in this repository. See LICENSE / third-party notices."},
+        {"method": "VAD + CLAP-AD (ours)", "ctrl": true, "driving_score": 75.04, "delta_driving_score": 32.7, "success_rate_pct": 47.27,
+          "note": "Code/checkpoint not released in this repo -- built on Bench2DriveZoo (CC BY-NC-ND 4.0), see LICENSE / third-party notices."}
+      ]
+    },
+    {
+      "expert": "Rule-based expert (PDM-Lite)",
+      "methods": [
+        {"method": "SpaceDrive", "ctrl": false, "driving_score": 78.02, "delta_driving_score": null, "success_rate_pct": 55.11},
+        {"method": "SimLingo", "ctrl": false, "driving_score": 85.07, "delta_driving_score": null, "success_rate_pct": 67.27},
+        {"method": "TFv6", "ctrl": false, "driving_score": 94.70, "delta_driving_score": null, "success_rate_pct": 82.1},
+        {"method": "TFv6 + CLAP-AD (ours)", "ctrl": true, "driving_score": 92.30, "delta_driving_score": -2.4, "success_rate_pct": 75.00,
+          "checkpoint": "https://huggingface.co/thomasschwarzfischer/clap-ad/tree/main/tfv6"}
+      ]
+    }
+  ]
+}

@@ -1,49 +1,216 @@
-<p align="center">
-  <img src="https://avatars.githubusercontent.com/u/269669339?s=200&v=4" alt="KE:SAI" height="60">&nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="https://www.iapb.org/wp-content/uploads/2020/09/The-Eberhard-Karls-University-of-Tubingen.png" alt="University of Tübingen" height="60">&nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="https://research.nvidia.com/labs/gear/images/media/nvidia_hu_9c090f760c3ff52d.png" alt="NVIDIA" height="60">
-</p>
+<h1 align="center"><b>CLAP-AD</b></h1>
 
-<h2 align="center">
-  <b>LEAD: Minimizing Learner–Expert Asymmetry in End-to-End Driving</b>
-</h2>
+<h3 align="center">
+  Closed-Loop Aware Planning via Imitation-Free Speed Scoring<br>for End-to-End Autonomous Driving
+</h3>
+
+<p align="center"><i>WACV 2027</i></p>
 
 <p align="center">
-  <a href="https://ln2697.github.io/lead">Website</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://ln2697.github.io/lead/docs">Docs</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://huggingface.co/datasets/ln2697/lead_carla">Dataset</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://huggingface.co/ln2697/tfv6">Model</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://huggingface.co/ln2697/tfv6_navsim">NAVSIM Model</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://ln2697.github.io/assets/pdf/Nguyen26.EA.SUPP.pdf">Supplementary</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://arxiv.org/abs/2512.20563">Paper</a>
-</p>
-
-<p align="center">
-  An open-source end-to-end driving stack for CARLA.</br>
-  ▶ State-of-the-art performance on all major Leaderboard 2.0 benchmarks ◀
+  <a href="#">Paper</a> (TODO: arXiv link upon release)&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#">Project Page</a> (TODO)&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://huggingface.co/thomasschwarzfischer/clap-ad">Checkpoints</a> (placeholder)&nbsp;&nbsp;·&nbsp;&nbsp;<a href="3rd_party/navsim_workspace/README.md">NAVSIM README</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="results/">Result Files</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#citation">Citation</a>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Bench2Drive-95 DS 🏆-00484B?style=for-the-badge&labelColor=006064" alt="Bench2Drive">
-  <img src="https://img.shields.io/badge/Longest6_V2-62 DS 🏆-141A5F?style=for-the-badge&labelColor=1A237E" alt="Longest6 V2">
-  <img src="https://img.shields.io/badge/Town13-10 DS 🏆-BF8E1E?style=for-the-badge&labelColor=FFBE28" alt="Town13">
-  <img src="https://img.shields.io/badge/Fail2Drive-75 HM 🏆-4A148C?style=for-the-badge&labelColor=6A1B9A" alt="Fail2Drive">
-</p>
-
-
-<p align="center">
-  <a href="https://ln2697.github.io">Long Nguyen</a><sup>1,3</sup>&nbsp;&nbsp;·&nbsp;&nbsp;
-  <a href="https://de.linkedin.com/in/micha-fauth-b4492a22b">Micha Fauth</a><sup>1</sup>&nbsp;&nbsp;·&nbsp;&nbsp;
-  <a href="https://kait0.github.io">Bernhard Jaeger</a><sup>1,3</sup>&nbsp;&nbsp;·&nbsp;&nbsp;
-  <a href="https://danieldauner.github.io">Daniel Dauner</a><sup>1,3</sup>
-  <br>
-  <a href="https://maximilianigl.com">Maximilian Igl</a><sup>2</sup>&nbsp;&nbsp;·&nbsp;&nbsp;
-  <a href="http://www.cvlibs.net">Andreas Geiger</a><sup>1,3</sup>&nbsp;&nbsp;·&nbsp;&nbsp;
-  <a href="https://kashyap7x.github.io">Kashyap Chitta</a><sup>2</sup>
+  Authors: <i>TODO — anonymized for double-blind review, to be filled in upon acceptance.</i>
 </p>
 
 <p align="center">
-  <sup>1</sup>University of Tübingen, Tübingen AI Center&nbsp;&nbsp;·&nbsp;&nbsp;<sup>2</sup>NVIDIA Research&nbsp;&nbsp;·&nbsp;&nbsp;<sup>3</sup>KE:SAI
+  <img src="https://img.shields.io/badge/Bench2Drive--Speed-82.53_SA-1B5E20?style=for-the-badge" alt="Bench2Drive-Speed SA">
+  <img src="https://img.shields.io/badge/UniAD-%2B28.5_DS-00484B?style=for-the-badge" alt="UniAD improvement">
+  <img src="https://img.shields.io/badge/VAD-%2B32.7_DS-141A5F?style=for-the-badge" alt="VAD improvement">
+  <img src="https://img.shields.io/badge/NAVSIM_v2-%2B6.1_EPDMS-6A1B9A?style=for-the-badge" alt="NAVSIM v2 improvement">
 </p>
+
+This repository provides the official **CARLA** implementation of CLAP-AD,
+built on top of [LEAD](https://github.com/kesai-labs/lead), an open-source
+end-to-end driving stack (LEAD's own README content, extended with everything
+CLAP-AD-specific, is preserved further down — see
+[§ Beyond CLAP-AD: the LEAD stack](#beyond-clap-ad-the-lead-stack)). The
+**NAVSIM** implementation lives in a nested package with its own README, see
+[3rd_party/navsim_workspace/README.md](3rd_party/navsim_workspace/README.md).
+
+## Overview
+
+End-to-end driving models are almost always trained with imitation learning
+on a single expert demonstration per scene. This throws away the fact that
+driving is inherently multi-modal — many different speeds can be safe
+responses to the same scene — and gives the model no way to accept a
+user-specified speed preference at test time. **CLAP-AD** (**C**losed-**L**oop
+**A**ware **P**lanning for **A**utonomous **D**riving) addresses this with a
+plug-in planning head that learns the *path* through imitation while scoring a
+discrete set of candidate *speeds* against physically grounded, per-criterion
+safety constraints (collision/TTC, traffic light, stop sign, overtake). At
+test time, the controller simply picks the requested speed class if the model
+scores it safe, and falls back to the closest safe speed otherwise — no
+retraining required for test-time speed control.
+
+CLAP-AD is a drop-in replacement for the planning head of existing E2E models:
+we evaluate it on **UniAD**, **VAD**, and **TFv6** (CARLA / Bench2Drive), and
+on **LTFv6** (NAVSIM v2), with no other architectural changes.
+
+<p align="center">
+  <img src="docs/assets/clapad_architecture.png" alt="CLAP-AD architecture: an ego-path decoder plus per-criterion collision / traffic-light / stop-sign speed-scoring heads" width="100%">
+</p>
+
+<p align="center">
+  <img src="docs/assets/clapad_speed_adherence.png" alt="Speed-Adherence profile: CLAP-AD on TFv6 tracks a requested speed step far more closely than baselines" width="85%">
+  <br><sub><i>CLAP-AD tracks a requested speed step (dashed) far more closely than baselines with no speed-control mechanism, on a representative Bench2Drive-Speed route.</i></sub>
+</p>
+
+> [!IMPORTANT]
+> **Licensing note.** This repository ships code and checkpoints for the
+> **TFv6 (CARLA)** and **LTFv6 (NAVSIM)** CLAP-AD backbones only. The paper's
+> UniAD/VAD variants are built on top of the separately-licensed
+> [Bench2DriveZoo](https://github.com/Thinklab-SJTU/Bench2DriveZoo) codebase
+> (CC BY-NC-ND 4.0), which forbids redistributing derivative code/weights —
+> so no UniAD/VAD code or checkpoints are included here. Their paper numbers
+> are still reported below and in [results/](results/) for reference. See
+> [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the full licensing
+> breakdown.
+
+## Results
+
+### CARLA — Bench2Drive (220 closed-loop routes)
+
+Full data: [results/carla/main_table_bench2drive220.json](results/carla/main_table_bench2drive220.json).
+
+| Method | Test-time speed control | DS ↑ | ΔDS | SR (%) ↑ |
+| :--- | :---: | ---: | ---: | ---: |
+| *Bench2Drive-base data (Think2Drive expert)* | | | | |
+| UniAD¹ | ❌ | 45.81 | – | 16.36 |
+|　+ CLAP-AD¹ | ✅ | 74.29 | **+28.5** | 49.09 |
+| VAD¹ | ❌ | 42.35 | – | 15.00 |
+| 　+ CLAP-AD¹ | ✅ | 75.04 | **+32.7** | 47.27 |
+| *Rule-based expert (PDM-Lite)* | | | | |
+| TFv6 | ❌ | **94.70** | – | **82.10** |
+| 　+ CLAP-AD (this repo) | ✅ | 92.30 | −2.4 | 75.00 |
+
+¹ UniAD/VAD (+ CLAP-AD) numbers reported for reference only — code/checkpoints
+not released here, see licensing note above.
+
+### CARLA — Bench2Drive-Speed (48 routes, desired-speed conditioned)
+
+Full data: [results/carla/b2d_speed_48routes.json](results/carla/b2d_speed_48routes.json).
+
+| Method | SA (All) ↑ | SA (Hard) ↑ | Efficiency ↑ | DS ↑ | SR (%) ↑ |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| TCP-Speed | 69.23 | 62.81 | 169.84 | 29.66 | 18.75 |
+| SparseDriveV2 | 51.13 | 51.18 | 91.77 | **94.63** | 60.41 |
+| TFv6 | 69.64 | 69.86 | 154.58 | 92.59 | 58.33 |
+| **TFv6 + CLAP-AD (this repo)** | **82.53** | **80.98** | **187.80** | 88.47 | 50.00 |
+| UniAD¹ / + CLAP-AD¹ | 54.22 / 79.41 | 53.90 / 79.00 | 108.49 / 170.03 | 18.90 / 75.15 | 4.16 / 41.67 |
+| VAD¹ / + CLAP-AD¹ | 61.63 / 75.51 | 57.66 / 74.07 | 130.53 / 159.48 | 40.23 / 90.52 | 20.83 / 52.08 |
+
+¹ Reference only, not released here (see licensing note).
+
+### NAVSIM v2 (navhard)
+
+Full data: [results/navsim/navsim_v2_navhard.csv](results/navsim/navsim_v2_navhard.csv). Details and reproduction: [3rd_party/navsim_workspace/README.md](3rd_party/navsim_workspace/README.md).
+
+| Method | Stage 1 EPDMS ↑ | Stage 2 NC ↑ | Stage 2 TTC ↑ | EPDMS ↑ |
+| :--- | ---: | ---: | ---: | ---: |
+| TransFuser | – | 77.7 | 75.6 | 23.1 |
+| LTFv6 (backbone) | – | 79.9 | 76.1 | 31.9 |
+| **LTFv6 + CLAP-AD (this repo)** | – | **90.3** | **87.7** | **38.0** |
+
+## Quickstart
+
+The steps below set up the **CARLA** implementation of CLAP-AD using the
+[env-beta devcontainer](/.devcontainer/env-beta/devcontainer.json) with a
+**container-level Python environment** (no venv needed for CARLA). For
+**NAVSIM**, which uses a separate venv, see
+[3rd_party/navsim_workspace/README.md](3rd_party/navsim_workspace/README.md).
+
+### 1. Open the devcontainer
+
+Open this workspace in VS Code and reopen in the `env-beta` devcontainer
+(`Dev Containers: Reopen in Container` → select `env-beta`). Its
+`postCreateCommand` installs `lead` and all CARLA-side dependencies
+system-wide (`uv pip install --system -e '.[dev]'`) and symlinks a CARLA 0.9.15
+install to `3rd_party/CARLA_0915`. No manual `conda`/`venv` setup is required
+for the CARLA side — see [pyproject.toml](pyproject.toml) for the exact
+dependency set if you need to reproduce this outside the devcontainer.
+
+Then register the project root once per shell (or add to `~/.bashrc`):
+
+```bash
+cd /workspace/lead
+export LEAD_PROJECT_ROOT=$(pwd)
+source scripts/main.sh
+```
+
+If you need to (re-)start a CARLA server yourself:
+
+```bash
+bash scripts/start_carla.sh   # or: connect to an already-running server (see below)
+```
+
+### 2. Download a checkpoint
+
+```bash
+# TODO: placeholder until checkpoints are uploaded.
+git clone https://huggingface.co/thomasschwarzfischer/clap-ad outputs/checkpoints/clapad
+# Expected layout: outputs/checkpoints/clapad/tfv6/model_*.pth
+```
+
+### 3. Evaluate (closed-loop, one route)
+
+With a CARLA server reachable (e.g. already running on port `30000`):
+
+```bash
+python lead/leaderboard_wrapper.py \
+  --checkpoint outputs/checkpoints/clapad/tfv6 \
+  --routes data/benchmark_routes/bench2drive/23687.xml \
+  --bench2drive \
+  --port 30000 --traffic-manager-port 38000
+```
+
+Full 220-route / multi-GPU Bench2Drive evaluation:
+[scripts_clapad/eval_clapad_b2d.sh](scripts_clapad/eval_clapad_b2d.sh).
+
+**Test-time speed control (Bench2Drive-Speed, 48 routes):**
+
+```bash
+python lead/leaderboard_wrapper.py \
+  --checkpoint outputs/checkpoints/clapad/tfv6 \
+  --routes data/benchmark_routes/b2dspd_eval48.xml \
+  --bench2drive-speed \
+  --port 30000 --traffic-manager-port 38000
+```
+
+or via [scripts_clapad/eval_clapad_b2dspeed.sh](scripts_clapad/eval_clapad_b2dspeed.sh).
+Each route in `b2dspd_eval48.xml` carries a desired-speed profile; CLAP-AD's
+controller follows it whenever its scoring heads consider it safe (see
+`lead/inference/closed_loop_inference.py` and `config_closed_loop.py`'s
+`score_threshold`).
+
+### 4. Train
+
+CLAP-AD post-trains on top of a pretrained TFv6 perception backbone. This
+branch's default [`config_training.py`](lead/training/config_training.py)
+values already match the WACV submission's speed classes / CLAP-AD settings.
+
+```bash
+# Stage 1: perception pretraining (shared with the vanilla TFv6 baseline)
+bash scripts/pretrain_ddp.sh
+
+# Stage 2: CLAP-AD planning post-training
+PRETRAINED_CKPT=outputs/local_training/pretrain/model_0030.pth \
+  bash scripts_clapad/posttrain_clapad_b2d.sh
+```
+
+See [scripts_clapad/](scripts_clapad) for all CLAP-AD-specific CARLA scripts,
+and [§ 2.3 Training](#23-training) below for the underlying data/caching
+pipeline (unchanged from LEAD).
 
 ## Table of Contents
 
+- [Overview](#overview)
+- [Results](#results)
+- [Quickstart](#quickstart)
 - [Table of Contents](#table-of-contents)
 - [Updates](#updates)
+- [Beyond CLAP-AD: the LEAD stack](#beyond-clap-ad-the-lead-stack)
 - [1. Quick Start](#1-quick-start)
   - [1.1. Environment initialization](#11-environment-initialization)
   - [1.2. Install dependencies](#12-install-dependencies)
@@ -65,6 +232,7 @@
 - [5. Common Issues](#5-common-issues)
 - [Beyond CARLA: Cross-Benchmark Deployment](#beyond-carla-cross-benchmark-deployment)
 - [Further Documentation](#further-documentation)
+- [License](#license)
 - [Acknowledgements](#acknowledgements)
 - [Citation](#citation)
 
@@ -74,6 +242,7 @@
 
 | Date         | Content                                                                                                                                 |
 | :----------- | :-------------------------------------------------------------------------------------------------------------------------------------- |
+| **TODO**     | CLAP-AD accepted to **WACV 2027** 🎉 — code, checkpoints (placeholder links) and result files released. See [§ CLAP-AD](#clap-ad) above. |
 | **26.04.17** | <b>WARNING: </b> LTFv6 NAVSIM checkpoint predicts in CARLA's left-handed frame. When using inference code in HuggingFace, convert waypoints/headings back to ISO 8855 before evaluation. |
 | **26.04.14** | <b>WARNING: </b> The parameter `transfuser_token_dim`'s default value should be `256`, as used in the paper, and not `64`.          |
 | **26.04.13** | <b>WARNING: </b> In some rare cases, we notice training instability. See [instructions](#5-common-issues), if you face similar problem. |
@@ -87,6 +256,17 @@
 | **25.12.24** | Initial release — paper, checkpoints, expert driver, and inference code.                                                                |
 
 </div>
+
+## Beyond CLAP-AD: the LEAD stack
+
+This repository is a fork of [LEAD](https://github.com/kesai-labs/lead), and
+keeps LEAD's full feature set alongside CLAP-AD: the underlying TFv6
+data-collection/training/benchmarking pipeline, the Fail2Drive and CaRL
+extensions, and the 123D data format. The rest of this README (sections 1-5
+below, largely unchanged from upstream LEAD) documents that stack in detail —
+read it if you want to collect your own data, train the vanilla (non-CLAP-AD)
+TFv6 baseline, or use one of the other extensions. If you only care about
+reproducing the CLAP-AD paper, the [Quickstart](#quickstart) above is enough.
 
 ## 1. Quick Start
 
@@ -750,6 +930,17 @@ For a deeper dive, visit the [full documentation site](https://ln2697.github.io/
 
 The documentation will be updated regularly.
 
+## License
+
+This repository is released under the [MIT License](LICENSE). It vendors
+several third-party projects under `3rd_party/` with their own licenses
+(mostly MIT and Apache-2.0, with one CC BY-NC-ND 4.0 exception for the
+vendored Bench2Drive-Speed benchmark) — see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the full breakdown,
+including why UniAD/VAD CLAP-AD code/checkpoints are not distributed here
+(they depend on the separately CC BY-NC-ND-licensed
+[Bench2DriveZoo](https://github.com/Thinklab-SJTU/Bench2DriveZoo)).
+
 ## Acknowledgements
 
 This project builds on the shoulders of excellent open-source work. Special thanks to [carla_garage](https://github.com/autonomousvision/carla_garage) for the foundational codebase.
@@ -760,11 +951,33 @@ This project builds on the shoulders of excellent open-source work. Special than
   <a href="https://github.com/RenzKa/simlingo">SimLingo</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://github.com/autonomousvision/plant2">PlanT2</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://github.com/autonomousvision/Bench2Drive-Leaderboard">Bench2Drive Leaderboard</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://github.com/Thinklab-SJTU/Bench2Drive/">Bench2Drive</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://github.com/autonomousvision/CaRL">CaRL</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://github.com/autonomousvision/fail2drive">Fail2Drive</a>
 </p>
 
-Long Nguyen led development of the project. Kashyap Chitta, Bernhard Jaeger, and Andreas Geiger contributed through technical discussion and advisory feedback. Daniel Dauner provided guidance with NAVSIM.
+We additionally thank the authors of
+[Bench2Drive-Speed](https://github.com/) (desired-speed evaluation benchmark
+and TCP-Speed baseline, vendored under `3rd_party/Bench2Drive-Speed`, CC
+BY-NC-ND 4.0) and of
+[Bench2DriveZoo](https://github.com/Thinklab-SJTU/Bench2DriveZoo) (UniAD/VAD
+reference implementations used for the paper's UniAD/VAD experiments, not
+redistributed here).
+
+CLAP-AD builds directly on [LEAD](https://github.com/kesai-labs/lead); Long
+Nguyen led development of that underlying codebase. Kashyap Chitta, Bernhard
+Jaeger, and Andreas Geiger contributed through technical discussion and
+advisory feedback. Daniel Dauner provided guidance with NAVSIM.
 
 ## Citation
 
 If you find this work useful, please consider giving this repository a star and citing our paper:
+
+```bibtex
+@inproceedings{ClapAD2027WACV,
+	author    = {TODO},
+	title     = {Closed-Loop Aware Planning via Imitation-Free Speed Scoring for End-to-End Autonomous Driving},
+	booktitle = {IEEE/CVF Winter Conference on Applications of Computer Vision (WACV)},
+	year      = {2027},
+}
+```
+
+This codebase is built on LEAD; if you use the underlying CARLA stack, please also consider citing:
 
 ```bibtex
 @inproceedings{Nguyen2026CVPR,

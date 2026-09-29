@@ -1029,12 +1029,26 @@ class Visualizer:
             speed_bins=speed_bins,
             crt_cfg_dict=self.config.speed_scoring_cfg_dict,
         )
-        curr_speed = self.data.get("speed")[0]
+        curr_speed = self.data.get("speed")
         path_pred = self.predictions.pred_clapad["sdc_traj"]
         scores_pred = self.predictions.pred_clapad["speed_logits"][:,0:1]
-        scene_score_info = [self.data.get("scene_score_info")]
+        # `scene_score_info` is already a list of per-sample dicts (one per
+        # batch element, see `mixed_data_collate_fn`), matching how
+        # `planning_head_clapad.py` consumes it directly during training --
+        # do not wrap it in another list here. `curr_speed`/`path_pred`/
+        # `scores_pred` are likewise kept batched (shape [B, ...]) to match.
+        scene_score_info = self.data.get("scene_score_info")
         loss = self.loss_speed(curr_speed, path_pred, scores_pred, scene_score_info, debug=True)
-        scores_gt = torch.stack(list(loss["raw_scores"].values())).squeeze().cpu().float().numpy()  # (3, 7)
+        # `loss["raw_scores"][mode]` has shape [B, K, S_CLS] (batch, augmented
+        # paths, speed classes); this function renders a single BEV image +
+        # bar chart, so select batch sample 0 and path 0 (the non-augmented
+        # path), matching `_pred_speed_logits_clap`'s `sp_logits[0][0]` above.
+        scores_gt = (
+            torch.stack([v[0, 0] for v in loss["raw_scores"].values()])
+            .cpu()
+            .float()
+            .numpy()
+        )  # (3, 7)
         bar_img = draw_speed_scores_append_bottom(self.bev_image, scores_gt, speed_bins, 
                                                   title="GT Speed Scores")
         self.barplot_gt = bar_img

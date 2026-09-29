@@ -23,8 +23,10 @@ NAVSIM_DEVKIT_ROOT="${NAVSIM_WORKSPACE}/navsimv1.1"
 DATASET_DIR="${NAVSIM_WORKSPACE}/dataset"
 EXP_DIR="${NAVSIM_WORKSPACE}/exp"
 
-# Source of the NAVSIM dataset on the shared drive.
-NAVSIM_DATA_SRC="/data/datasets/AD_datasets/navsim_v2"
+# Source of the NAVSIM dataset. Point this at wherever you downloaded/mounted
+# the NAVSIM v2 dataset (navsim_logs/, sensor_blobs/, maps/), e.g. via NAVSIM's
+# own download scripts (3rd_party/navsim_workspace/navsimv2.2/download/*.sh).
+NAVSIM_DATA_SRC="${NAVSIM_DATA_SRC:-/data/datasets/AD_datasets/navsim_v2}"
 
 echo "==> LEAD project root: ${LEAD_PROJECT_ROOT}"
 echo "==> NAVSIM devkit:     ${NAVSIM_DEVKIT_ROOT}"

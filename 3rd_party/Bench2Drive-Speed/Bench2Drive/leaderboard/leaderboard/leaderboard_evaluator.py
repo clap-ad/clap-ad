@@ -66,7 +66,11 @@ sensors_to_icons = {
 
 def get_weather_id(weather_conditions):
     from xml.etree import ElementTree as ET
-    tree = ET.parse('leaderboard/data/weather.xml')
+    # NOTE (CLAP-AD compat patch): resolve relative to this file's location
+    # instead of the caller's CWD, so this works when invoked from the repo
+    # root (as documented), not just from this leaderboard package's directory.
+    _leaderboard_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    tree = ET.parse(os.path.join(_leaderboard_root, 'data', 'weather.xml'))
     root = tree.getroot()
     def conditions_match(weather, conditions):
         for (key, value) in weather:
@@ -94,7 +98,12 @@ def find_free_port(starting_port):
         except OSError:
             port += 1
 
-def shuffle_weather(original_params, xml_path='leaderboard/data/weather.xml'):
+def shuffle_weather(original_params, xml_path=None):
+    if xml_path is None:
+        # NOTE (CLAP-AD compat patch): see get_weather_id above.
+        xml_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'weather.xml'
+        )
     """
     Randomly select one weather case from the XML file and apply it to the given WeatherParameters object.
 

@@ -11,7 +11,6 @@ from torch.utils.tensorboard import SummaryWriter
 from lead.tfv6.tfv6 import Prediction, TFv6
 from lead.training.config_training import TrainingConfig
 from lead.visualization.visualizer import visualize_sample
-from utils_base.remote_tracking import RemoteTracker
 
 LOG = logging.getLogger(__name__)
 
@@ -246,6 +245,20 @@ class Logger:
 def setup_clearml(config):
     import warnings
     warnings.filterwarnings("ignore", category=DeprecationWarning) # For Clearml issues with newer versions of some libraries
+
+    # `utils_base` is an internal (non-public) package providing ClearML
+    # remote-tracking helpers. It is not published in this repository, so
+    # this import is deferred here (rather than at module load time) and
+    # only required if you explicitly opt into `log_clearml=true`.
+    try:
+        from utils_base.remote_tracking import RemoteTracker
+    except ImportError as e:
+        raise ImportError(
+            "log_clearml=true requires the internal 'utils_base' package, "
+            "which is not published in this repository. Either install your "
+            "own copy of it, or leave log_clearml at its default (False)."
+        ) from e
+
     # setup remote tracking
     user_name = os.environ.get("USER_NAME", "default_user")
     rt = RemoteTracker(

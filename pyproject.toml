@@ -5,10 +5,11 @@ requires = [ "setuptools==81" ]
 [project]
 name = "lead"
 version = "0.0.1"
-description = "LEAD: Minimizing Learner-Expert Asymmetry in End-to-End Driving"
+description = "CLAP-AD: Closed-Loop Aware Planning for Autonomous Driving (built on the LEAD codebase)"
 readme = "README.md"
 license-files = [ "LICENSE" ]
 authors = [ { name = "Long Nguyen", email = "long@kesai.eu" } ]
+maintainers = [ { name = "Thomas Schwarzfischer" } ]
 requires-python = ">=3.10,<3.11"
 classifiers = [
   "Programming Language :: Python :: 3 :: Only",
@@ -76,8 +77,8 @@ optional-dependencies.dev = [
   "xmlformatter>=0.2.8",
   "xmlschema==1.0.18",
 ]
-urls.Homepage = "https://ln2697.github.io/lead"
-urls.Repository = "https://github.com/kesai-labs/lead"
+urls.Homepage = "https://github.com/ThomasSchwarzfischer/clap-ad"
+urls.Repository = "https://github.com/ThomasSchwarzfischer/clap-ad"
 
 [tool.setuptools]
 package-data.lead = [ "**/*" ]
