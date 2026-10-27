@@ -77,8 +77,8 @@ optional-dependencies.dev = [
   "xmlformatter>=0.2.8",
   "xmlschema==1.0.18",
 ]
-urls.Homepage = "https://github.com/ThomasSchwarzfischer/clap-ad"
-urls.Repository = "https://github.com/ThomasSchwarzfischer/clap-ad"
+urls.Homepage = "https://clap-ad.github.io/"
+urls.Repository = "https://github.com/clap-ad/clap-ad"
 
 [tool.setuptools]
 package-data.lead = [ "**/*" ]

@@ -1,7 +1,7 @@
 <h1 align="center"><b>CLAP-AD — NAVSIM Implementation</b></h1>
 
 <p align="center">
-  <a href="../../README.md">← Back to the main (CARLA) README</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#">Paper</a> (TODO)&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://huggingface.co/thomasschwarzfischer/clap-ad">Checkpoints</a> (placeholder)&nbsp;&nbsp;·&nbsp;&nbsp;<a href="../../results/navsim/navsim_v2_navhard.csv">Result CSV</a>
+  <a href="../../README.md">Main README</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#">Paper (arXiv link coming soon)</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://clap-ad.github.io/">Project Page</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://huggingface.co/thomasschwarzfischer/clap-ad">Checkpoints (placeholder)</a>
 </p>
 
 This directory hosts the **NAVSIM v2** implementation of CLAP-AD, evaluated in
@@ -53,7 +53,7 @@ The paper's Section 5.2 describes the CARLA→NAVSIM adaptation:
 
 ## Results
 
-Full data: [../../results/navsim/navsim_v2_navhard.csv](../../results/navsim/navsim_v2_navhard.csv) (paper Table 3, `navhard` split, two-stage evaluation).
+Results below report the paper's NAVSIM v2 `navhard` two-stage evaluation.
 
 | Method | Stage | NC ↑ | DAC ↑ | DDC ↑ | TL ↑ | EP ↑ | TTC ↑ | LK ↑ | HC ↑ | EC ↑ | EPDMS ↑ |
 | :--- | :---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -71,16 +71,13 @@ optimizes for (NC, TTC, DAC), at a cost in Ego Progress (EP) and Comfort
 
 ## Installation
 
-NAVSIM uses a **separate Python 3.10 virtualenv** from the CARLA side (its
-pinned `torch==2.0.1` conflicts with LEAD's CARLA-side `torch==2.6.0`), nested
-inside this directory. All commands below assume you're in the repo root
-(`/workspace/lead`) inside the
-[env-beta devcontainer](../../.devcontainer/env-beta/devcontainer.json) (see
-the [main README's Quickstart](../../README.md#quickstart)).
+NAVSIM uses a separate Python 3.10 virtual environment because its pinned
+PyTorch and NumPy versions differ from the CARLA environment. No container is
+required. Run the commands below from the root of this repository.
 
 ### 1. Get the NAVSIM dataset
 
-Download/mount the NAVSIM v2 dataset (`navsim_logs/`, `sensor_blobs/`,
+Download or mount the NAVSIM dataset (`navsim_logs/`, `sensor_blobs/`,
 `maps/`) as described in
 [navsimv1.1/docs/install.md](navsimv1.1/docs/install.md) (for `navtrain`/
 `navtest`) and
@@ -89,21 +86,25 @@ either symlink it, or point `NAVSIM_DATA_SRC` at it and run the setup script
 below, which will symlink it for you:
 
 ```bash
-export NAVSIM_DATA_SRC=/path/to/your/navsim_v2   # contains navsim_logs/, sensor_blobs/, maps/
+export NAVSIM_DATA_SRC=/path/to/navsim_v2   # contains navsim_logs/, sensor_blobs/, maps/
 ```
 
-### 2. Create the venv and install dependencies
+Dataset installation is separate from installing the Python environment. You
+can set up the environment first and rerun the setup script after downloading
+the data to create its symlinks.
+
+### 2. Create the environment
 
 ```bash
-cd /workspace/lead
+python3.10 --version
 bash scripts_navsim/setup_navsim.sh
 ```
 
-This is idempotent and will:
-1. Symlink `NAVSIM_DATA_SRC` into `3rd_party/navsim_workspace/dataset/`.
-2. Create a venv at `3rd_party/navsim_workspace/navsimv1.1/venv`.
-3. Install the NAVSIM devkit (`navsimv1.1/requirements.txt` + `pip install -e navsimv1.1`).
-4. Install this repo's `lead` package into the same venv (`pip install -e ../..`).
+The idempotent script creates `3rd_party/navsim_workspace/navsimv1.1/venv`,
+installs the NAVSIM requirements and this repository's package without
+replacing NAVSIM's pinned Torch/NumPy versions, and links the dataset if
+`NAVSIM_DATA_SRC` is set. The system's Python 3.10 venv support must be
+installed before running it (for example, `python3.10-venv` on Debian/Ubuntu).
 
 ### 3. Activate the environment
 
@@ -114,7 +115,7 @@ source scripts_navsim/navsim_env.sh
 ```
 
 This activates the venv and exports `NUPLAN_MAPS_ROOT`, `NAVSIM_EXP_ROOT`,
-`NAVSIM_DEVKIT_ROOT`, `OPENSCENE_DATA_ROOT`.
+`NAVSIM_DEVKIT_ROOT`, and `OPENSCENE_DATA_ROOT`.
 
 ## Quickstart
 
@@ -127,11 +128,11 @@ python $NAVSIM_DEVKIT_ROOT/navsim/planning/script/run_metric_caching.py \
     cache.cache_path=$NAVSIM_EXP_ROOT/metric_cache_navtest
 
 # Training cache (needed for training)
-bash ../../scripts_navsim/build_navsim_cache.sh   # SPLIT=navtrain by default
+bash scripts_navsim/build_navsim_cache.sh   # SPLIT=navtrain by default
 ```
 
 For a quick dry-run, use the small `navmini` split instead:
-`SPLIT=navmini bash ../../scripts_navsim/build_navsim_cache.sh`.
+`SPLIT=navmini bash scripts_navsim/build_navsim_cache.sh`.
 
 ### 2. Train
 
@@ -140,15 +141,15 @@ Training runs on the **LEAD side** (not the NAVSIM venv's own training code —
 
 ```bash
 # Stage 1: perception backbone pretraining (joint CARLA + NAVSIM)
-bash ../../scripts_navsim/pretrain_navsim.sh
+bash scripts_navsim/pretrain_navsim.sh
 
 # Stage 2a: baseline LTFv6 planning head (no CLAP-AD), for comparison
 PRETRAINED_CKPT=outputs/local_training/pretrain_navsim/model_0029.pth \
-  bash ../../scripts_navsim/posttrain_navsim_baseline.sh
+  bash scripts_navsim/posttrain_navsim_baseline.sh
 
 # Stage 2b: CLAP-AD planning head
 PRETRAINED_CKPT=outputs/local_training/pretrain_navsim/model_0029.pth \
-  bash ../../scripts_navsim/posttrain_clapad_navsim.sh
+  bash scripts_navsim/posttrain_clapad_navsim.sh
 ```
 
 ### 3. Evaluate
@@ -172,7 +173,7 @@ For the paper's `navhard` two-stage evaluation, follow
 ### 4. Visualize
 
 ```bash
-bash ../../scripts_navsim/run_vis_navsim.sh --agent clapad --checkpoint <path-to-checkpoint>
+bash scripts_navsim/run_vis_navsim.sh --agent clapad --checkpoint <path-to-checkpoint>
 ```
 
 Renders per-scene BEV (GT vs. CLAP-AD trajectory + speed) and the predicted

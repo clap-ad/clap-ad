@@ -16,4 +16,4 @@ torchrun --standalone \
     --max_restarts=0 \
     --rdzv_id=$SLURM_JOB_ID \
     --rdzv_backend=c10d \
-    python3 lead/training/train.py
+    lead/training/train.py

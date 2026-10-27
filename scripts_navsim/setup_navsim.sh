@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 #
-# One-shot installer for NAVSIM dependencies inside the LEAD devcontainer.
+# One-shot installer for the NAVSIM virtual environment.
 #
 # Usage:
-#   ./scripts/setup_navsim.sh
+#   ./scripts_navsim/setup_navsim.sh
 #
 # This script is idempotent: existing symlinks / venv are reused, so it is
 # safe to re-run. After it finishes, source the environment file to run
 # NAVSIM commands:
 #
-#   source scripts/navsim_env.sh
+#   source scripts_navsim/navsim_env.sh
 #
 set -euo pipefail
 
@@ -23,10 +23,10 @@ NAVSIM_DEVKIT_ROOT="${NAVSIM_WORKSPACE}/navsimv1.1"
 DATASET_DIR="${NAVSIM_WORKSPACE}/dataset"
 EXP_DIR="${NAVSIM_WORKSPACE}/exp"
 
-# Source of the NAVSIM dataset. Point this at wherever you downloaded/mounted
-# the NAVSIM v2 dataset (navsim_logs/, sensor_blobs/, maps/), e.g. via NAVSIM's
-# own download scripts (3rd_party/navsim_workspace/navsimv2.2/download/*.sh).
-NAVSIM_DATA_SRC="${NAVSIM_DATA_SRC:-/data/datasets/AD_datasets/navsim_v2}"
+# Optional source of the NAVSIM dataset. It should contain navsim_logs/,
+# sensor_blobs/, and maps/.
+NAVSIM_DATA_SRC="${NAVSIM_DATA_SRC:-}"
+PYTHON_BIN="${PYTHON_BIN:-python3.10}"
 
 echo "==> LEAD project root: ${LEAD_PROJECT_ROOT}"
 echo "==> NAVSIM devkit:     ${NAVSIM_DEVKIT_ROOT}"
@@ -42,29 +42,22 @@ fi
 echo "==> Creating dataset/exp directories"
 mkdir -p "${DATASET_DIR}" "${EXP_DIR}"
 
-echo "==> Linking NAVSIM dataset from ${NAVSIM_DATA_SRC}"
-if [ ! -d "${NAVSIM_DATA_SRC}" ]; then
-    echo "ERROR: NAVSIM data source not found at ${NAVSIM_DATA_SRC}" >&2
-    exit 1
-fi
-for sub in navsim_logs sensor_blobs maps; do
-    if [ ! -d "${NAVSIM_DATA_SRC}/${sub}" ]; then
-        echo "WARNING: ${NAVSIM_DATA_SRC}/${sub} does not exist, skipping" >&2
-        continue
+if [ -n "${NAVSIM_DATA_SRC}" ]; then
+    if [ ! -d "${NAVSIM_DATA_SRC}" ]; then
+        echo "ERROR: NAVSIM_DATA_SRC directory not found: ${NAVSIM_DATA_SRC}" >&2
+        exit 1
     fi
-    ln -sfn "${NAVSIM_DATA_SRC}/${sub}" "${DATASET_DIR}/${sub}"
-    echo "    ${DATASET_DIR}/${sub} -> ${NAVSIM_DATA_SRC}/${sub}"
-done
-
-# ---------------------------------------------------------------------------
-# 2. System package: python3.10-venv
-# ---------------------------------------------------------------------------
-if ! dpkg -s python3.10-venv >/dev/null 2>&1; then
-    echo "==> Installing python3.10-venv"
-    sudo apt-get update
-    sudo apt-get install -y python3.10-venv
+    echo "==> Linking NAVSIM dataset from ${NAVSIM_DATA_SRC}"
+    for sub in navsim_logs sensor_blobs maps; do
+        if [ ! -d "${NAVSIM_DATA_SRC}/${sub}" ]; then
+            echo "WARNING: ${NAVSIM_DATA_SRC}/${sub} does not exist, skipping" >&2
+            continue
+        fi
+        ln -sfn "${NAVSIM_DATA_SRC}/${sub}" "${DATASET_DIR}/${sub}"
+        echo "    ${DATASET_DIR}/${sub} -> ${NAVSIM_DATA_SRC}/${sub}"
+    done
 else
-    echo "==> python3.10-venv already installed"
+    echo "==> NAVSIM_DATA_SRC not set; skipping dataset links"
 fi
 
 # ---------------------------------------------------------------------------
@@ -72,10 +65,22 @@ fi
 # ---------------------------------------------------------------------------
 VENV_DIR="${NAVSIM_DEVKIT_ROOT}/venv"
 if [ ! -f "${VENV_DIR}/bin/activate" ]; then
+    if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
+        echo "ERROR: ${PYTHON_BIN} not found; install Python 3.10 with venv support or set PYTHON_BIN" >&2
+        exit 1
+    fi
+    if ! "${PYTHON_BIN}" -c 'import sys; assert sys.version_info[:2] == (3, 10)' >/dev/null 2>&1; then
+        echo "ERROR: NAVSIM requires Python 3.10; ${PYTHON_BIN} is not Python 3.10" >&2
+        exit 1
+    fi
     echo "==> Creating virtualenv at ${VENV_DIR}"
-    python3 -m venv "${VENV_DIR}"
+    "${PYTHON_BIN}" -m venv "${VENV_DIR}"
 else
     echo "==> Reusing existing virtualenv at ${VENV_DIR}"
+fi
+if ! "${VENV_DIR}/bin/python" -c 'import sys; assert sys.version_info[:2] == (3, 10)' >/dev/null 2>&1; then
+    echo "ERROR: existing NAVSIM venv must use Python 3.10: ${VENV_DIR}" >&2
+    exit 1
 fi
 
 # shellcheck disable=SC1091
@@ -92,10 +97,36 @@ pip install -r "${NAVSIM_DEVKIT_ROOT}/requirements.txt"
 pip install -e "${NAVSIM_DEVKIT_ROOT}"
 
 echo "==> Installing LEAD into the NAVSIM venv"
-pip install -e "${LEAD_PROJECT_ROOT}"
+pip install --no-deps -e "${LEAD_PROJECT_ROOT}"
 
-echo "==> Installing extra NAVSIM/LEAD dependencies"
-pip install beartype jaxtyping carla numba
+echo "==> Installing LEAD dependencies not supplied by NAVSIM"
+python - "${NAVSIM_DEVKIT_ROOT}/requirements.txt" <<'PY'
+from importlib.metadata import distribution
+from packaging.requirements import Requirement
+import subprocess
+import sys
+
+with open(sys.argv[1]) as requirements_file:
+    navsim_requirements = {
+        Requirement(line.split("#", 1)[0].strip()).name.lower()
+        for line in requirements_file
+        if line.split("#", 1)[0].strip()
+    }
+navsim_runtime_pins = {"numpy", "numba", "torch", "torchaudio", "torchvision"}
+lead_requirements = []
+for item in distribution("lead").requires or []:
+    requirement = Requirement(item)
+    if (
+        requirement.name.lower() not in navsim_requirements
+        and requirement.name.lower() not in navsim_runtime_pins
+        and (requirement.marker is None or requirement.marker.evaluate())
+    ):
+        lead_requirements.append(str(requirement))
+
+subprocess.check_call(
+    [sys.executable, "-m", "pip", "install", *lead_requirements, "numba==0.60.0"]
+)
+PY
 
 # ---------------------------------------------------------------------------
 # Done
@@ -107,7 +138,7 @@ NAVSIM setup complete.
 
 To use it in a new shell, activate the environment:
 
-    source scripts/navsim_env.sh
+    source scripts_navsim/navsim_env.sh
 
 Then, for example, build the metric cache and run evaluation:
 

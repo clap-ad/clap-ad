@@ -7,11 +7,11 @@
 <p align="center"><i>WACV 2027</i></p>
 
 <p align="center">
-  <a href="#">Paper</a> (TODO: arXiv link upon release)&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#">Project Page</a> (TODO)&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://huggingface.co/thomasschwarzfischer/clap-ad">Checkpoints</a> (placeholder)&nbsp;&nbsp;·&nbsp;&nbsp;<a href="3rd_party/navsim_workspace/README.md">NAVSIM README</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="results/">Result Files</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#citation">Citation</a>
+  <a href="#">Paper (arXiv link coming soon)</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://clap-ad.github.io/">Project Page</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://huggingface.co/thomasschwarzfischer/clap-ad">Checkpoints (placeholder)</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="3rd_party/navsim_workspace/README.md">NAVSIM implementation</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#citation">Citation</a>
 </p>
 
 <p align="center">
-  Authors: <i>TODO — anonymized for double-blind review, to be filled in upon acceptance.</i>
+  Emad Aghajanzadeh, Thomas Schwarzfischer, Marc Kaufeld, Moritz Thoma, Ryan Pégoud, Manoj Rohit Vemparala, Pierpaolo Mori, Nael Fasfous, Johannes Betz, Daniel Mueller-Gritschneder, Ulf Schlichtmann
 </p>
 
 <p align="center">
@@ -21,13 +21,11 @@
   <img src="https://img.shields.io/badge/NAVSIM_v2-%2B6.1_EPDMS-6A1B9A?style=for-the-badge" alt="NAVSIM v2 improvement">
 </p>
 
-This repository provides the official **CARLA** implementation of CLAP-AD,
-built on top of [LEAD](https://github.com/kesai-labs/lead), an open-source
-end-to-end driving stack (LEAD's own README content, extended with everything
-CLAP-AD-specific, is preserved further down — see
-[§ Beyond CLAP-AD: the LEAD stack](#beyond-clap-ad-the-lead-stack)). The
-**NAVSIM** implementation lives in a nested package with its own README, see
-[3rd_party/navsim_workspace/README.md](3rd_party/navsim_workspace/README.md).
+This repository contains the official CARLA and NAVSIM implementations of
+CLAP-AD, based on the [LEAD](https://github.com/kesai-labs/lead) end-to-end
+driving stack. The WACV 2027 paper is in preparation for arXiv release; its
+placeholder link will be updated when available. NAVSIM setup and evaluation
+instructions are in the [NAVSIM README](3rd_party/navsim_workspace/README.md).
 
 ## Overview
 
@@ -64,7 +62,7 @@ on **LTFv6** (NAVSIM v2), with no other architectural changes.
 > [Bench2DriveZoo](https://github.com/Thinklab-SJTU/Bench2DriveZoo) codebase
 > (CC BY-NC-ND 4.0), which forbids redistributing derivative code/weights —
 > so no UniAD/VAD code or checkpoints are included here. Their paper numbers
-> are still reported below and in [results/](results/) for reference. See
+> are reported below for reference. See
 > [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the full licensing
 > breakdown.
 
@@ -72,7 +70,8 @@ on **LTFv6** (NAVSIM v2), with no other architectural changes.
 
 ### CARLA — Bench2Drive (220 closed-loop routes)
 
-Full data: [results/carla/main_table_bench2drive220.json](results/carla/main_table_bench2drive220.json).
+Per-route output for the released TFv6 + CLAP-AD run:
+[tfv6_clapad_bench2drive220_merged.json](results/carla/route_results/tfv6_clapad_bench2drive220_merged.json).
 
 | Method | Test-time speed control | DS ↑ | ΔDS | SR (%) ↑ |
 | :--- | :---: | ---: | ---: | ---: |
@@ -90,8 +89,6 @@ not released here, see licensing note above.
 
 ### CARLA — Bench2Drive-Speed (48 routes, desired-speed conditioned)
 
-Full data: [results/carla/b2d_speed_48routes.json](results/carla/b2d_speed_48routes.json).
-
 | Method | SA (All) ↑ | SA (Hard) ↑ | Efficiency ↑ | DS ↑ | SR (%) ↑ |
 | :--- | ---: | ---: | ---: | ---: | ---: |
 | TCP-Speed | 69.23 | 62.81 | 169.84 | 29.66 | 18.75 |
@@ -105,7 +102,7 @@ Full data: [results/carla/b2d_speed_48routes.json](results/carla/b2d_speed_48rou
 
 ### NAVSIM v2 (navhard)
 
-Full data: [results/navsim/navsim_v2_navhard.csv](results/navsim/navsim_v2_navhard.csv). Details and reproduction: [3rd_party/navsim_workspace/README.md](3rd_party/navsim_workspace/README.md).
+Details and reproduction: [NAVSIM README](3rd_party/navsim_workspace/README.md).
 
 | Method | Stage 1 EPDMS ↑ | Stage 2 NC ↑ | Stage 2 TTC ↑ | EPDMS ↑ |
 | :--- | ---: | ---: | ---: | ---: |
@@ -115,35 +112,44 @@ Full data: [results/navsim/navsim_v2_navhard.csv](results/navsim/navsim_v2_navha
 
 ## Quickstart
 
-The steps below set up the **CARLA** implementation of CLAP-AD using the
-[env-beta devcontainer](/.devcontainer/env-beta/devcontainer.json) with a
-**container-level Python environment** (no venv needed for CARLA). For
-**NAVSIM**, which uses a separate venv, see
-[3rd_party/navsim_workspace/README.md](3rd_party/navsim_workspace/README.md).
+### 1. Install the environment
 
-### 1. Open the devcontainer
-
-Open this workspace in VS Code and reopen in the `env-beta` devcontainer
-(`Dev Containers: Reopen in Container` → select `env-beta`). Its
-`postCreateCommand` installs `lead` and all CARLA-side dependencies
-system-wide (`uv pip install --system -e '.[dev]'`) and symlinks a CARLA 0.9.15
-install to `3rd_party/CARLA_0915`. No manual `conda`/`venv` setup is required
-for the CARLA side — see [pyproject.toml](pyproject.toml) for the exact
-dependency set if you need to reproduce this outside the devcontainer.
-
-Then register the project root once per shell (or add to `~/.bashrc`):
+Install [Miniconda](https://docs.conda.io/projects/miniconda/en/latest/) if it
+is not already available. From the repository root, create and activate the
+Python 3.10 environment used by the project:
 
 ```bash
-cd /workspace/lead
-export LEAD_PROJECT_ROOT=$(pwd)
+conda create --override-channels -c conda-forge -n clapad python=3.10 uv -y
+conda activate clapad
+```
+
+Allow uv to install into the active Conda environment, then sync the locked
+runtime and development dependencies (including the CUDA 12.4 PyTorch build):
+
+```bash
+mkdir -p "$CONDA_PREFIX/etc/conda/activate.d" "$CONDA_PREFIX/etc/conda/deactivate.d"
+printf 'export VIRTUAL_ENV="$CONDA_PREFIX"\n' > "$CONDA_PREFIX/etc/conda/activate.d/uv.sh"
+printf 'unset VIRTUAL_ENV\n' > "$CONDA_PREFIX/etc/conda/deactivate.d/uv.sh"
+conda deactivate && conda activate clapad
+uv sync --active --extra dev
+
+export LEAD_PROJECT_ROOT="$(pwd)"
 source scripts/main.sh
 ```
 
-If you need to (re-)start a CARLA server yourself:
+The exact Python and CUDA dependency versions are pinned in [uv.lock](uv.lock).
+To reproduce the paper's training setup, use a CUDA-capable GPU; CPU-only
+execution is suitable for setup checks but is not the tested training path.
+
+Install CARLA 0.9.15 and its additional maps (large download):
 
 ```bash
-bash scripts/start_carla.sh   # or: connect to an already-running server (see below)
+bash scripts/setup_carla.sh
 ```
+
+Alternatively, set `3rd_party/CARLA_0915` to a symlink to an existing CARLA
+0.9.15 installation. Start the server with `bash scripts/start_carla.sh` or
+connect to an existing server.
 
 ### 2. Download a checkpoint
 
@@ -186,9 +192,10 @@ controller follows it whenever its scoring heads consider it safe (see
 
 ### 4. Train
 
-CLAP-AD post-trains on top of a pretrained TFv6 perception backbone. This
-branch's default [`config_training.py`](lead/training/config_training.py)
-values already match the WACV submission's speed classes / CLAP-AD settings.
+Training requires the CARLA expert dataset and a CUDA-capable GPU. Prepare the
+dataset cache using the instructions in [§ 2.3 Training](#23-training). For a
+GPU with 4 GiB memory, start with `batch_size=1` and one data-loader worker;
+the commands below otherwise use the defaults for a full training run:
 
 ```bash
 # Stage 1: perception pretraining (shared with the vanilla TFv6 baseline)
@@ -199,9 +206,41 @@ PRETRAINED_CKPT=outputs/local_training/pretrain/model_0030.pth \
   bash scripts_clapad/posttrain_clapad_b2d.sh
 ```
 
-See [scripts_clapad/](scripts_clapad) for all CLAP-AD-specific CARLA scripts,
-and [§ 2.3 Training](#23-training) below for the underlying data/caching
-pipeline (unchanged from LEAD).
+The defaults in [config_training.py](lead/training/config_training.py) match
+the paper's CLAP-AD settings. For a one-route smoke test on a small GPU, use
+the dataset at `data/carla_leaderboard2`, build its caches/buckets, and train
+one sample per stage:
+
+```bash
+python scripts/build_cache.py \
+  carla_root=data/carla_leaderboard2 assigned_cpu_cores=1 workers_per_cpu_cores=1
+python scripts/build_buckets_pretrain.py \
+  carla_root=data/carla_leaderboard2 assigned_cpu_cores=1 workers_per_cpu_cores=1
+
+LEAD_TRAINING_CONFIG="carla_root=data/carla_leaderboard2 \
+  logdir=outputs/local_training/smoke_pretrain \
+  carla_num_samples=1 batch_size=1 epochs=1 assigned_cpu_cores=1 \
+  workers_per_cpu_cores=1 \
+  use_training_session_cache=false compile=false" \
+  python lead/training/train.py
+
+python scripts/build_buckets_posttrain.py \
+  carla_root=data/carla_leaderboard2 assigned_cpu_cores=1 workers_per_cpu_cores=1
+LEAD_TRAINING_CONFIG="carla_root=data/carla_leaderboard2 \
+  logdir=outputs/local_training/smoke_clapad \
+  load_file=outputs/local_training/smoke_pretrain/model_0000.pth \
+  use_planning_decoder=true use_clapad_head=true \
+  carla_num_samples=1 batch_size=1 epochs=1 assigned_cpu_cores=1 \
+  workers_per_cpu_cores=1 \
+  use_training_session_cache=false compile=false" \
+  python lead/training/train.py
+```
+
+Mixed precision selects BF16 when supported and FP16 otherwise; set
+`use_mixed_precision_training=false` only if you need full precision. See
+[scripts_clapad/](scripts_clapad) for the full Bench2Drive evaluation and
+post-training scripts. NAVSIM has a separate workflow; see its
+[README](3rd_party/navsim_workspace/README.md).
 
 ## Table of Contents
 
@@ -209,7 +248,6 @@ pipeline (unchanged from LEAD).
 - [Results](#results)
 - [Quickstart](#quickstart)
 - [Table of Contents](#table-of-contents)
-- [Updates](#updates)
 - [Beyond CLAP-AD: the LEAD stack](#beyond-clap-ad-the-lead-stack)
 - [1. Quick Start](#1-quick-start)
   - [1.1. Environment initialization](#11-environment-initialization)
@@ -235,27 +273,6 @@ pipeline (unchanged from LEAD).
 - [License](#license)
 - [Acknowledgements](#acknowledgements)
 - [Citation](#citation)
-
-## Updates
-
-<div align="center">
-
-| Date         | Content                                                                                                                                 |
-| :----------- | :-------------------------------------------------------------------------------------------------------------------------------------- |
-| **TODO**     | CLAP-AD accepted to **WACV 2027** 🎉 — code, checkpoints (placeholder links) and result files released. See [§ CLAP-AD](#clap-ad) above. |
-| **26.04.17** | <b>WARNING: </b> LTFv6 NAVSIM checkpoint predicts in CARLA's left-handed frame. When using inference code in HuggingFace, convert waypoints/headings back to ISO 8855 before evaluation. |
-| **26.04.14** | <b>WARNING: </b> The parameter `transfuser_token_dim`'s default value should be `256`, as used in the paper, and not `64`.          |
-| **26.04.13** | <b>WARNING: </b> In some rare cases, we notice training instability. See [instructions](#5-common-issues), if you face similar problem. |
-| **26.04.11** | Added Fail2Drive benchmark support, see [instructions](#31-fail2drive-evaluation).                                                      |
-| **26.03.21** | Added evaluation support for the reinforcement-learning planner CaRL, see [instructions](#32-carl-agent-evaluation).                    |
-| **26.03.18** | Deactivated Kalman Filter and all post-processing heuristics. See performance report [here](#13-download-checkpoints).                  |
-| **26.02.25** | LEAD is accepted to **CVPR 2026** 🎉                                                                                                     |
-| **26.02.25** | NAVSIM extension released. Code and [instructions](#33-navsim-training-and-evaluation) available. Supplementary data coming soon.       |
-| **26.02.02** | Preliminary support for 123D. See [instructions](#34-carla-123d-data-collection).                                                       |
-| **26.01.13** | CARLA dataset and training documentation released.                                                                                      |
-| **25.12.24** | Initial release — paper, checkpoints, expert driver, and inference code.                                                                |
-
-</div>
 
 ## Beyond CLAP-AD: the LEAD stack
 
@@ -289,8 +306,8 @@ Get LEAD running locally: from cloning the repo and installing dependencies, to 
 Clone the repository and register the project root:
 
 ```bash
-git clone https://github.com/kesai-labs/lead.git
-cd lead
+git clone https://github.com/clap-ad/clapad-dev.git
+cd clapad-dev
 
 # Set project root variable
 echo -e "export LEAD_PROJECT_ROOT=$(pwd)" >> ~/.bashrc
@@ -952,7 +969,7 @@ This project builds on the shoulders of excellent open-source work. Special than
 </p>
 
 We additionally thank the authors of
-[Bench2Drive-Speed](https://github.com/) (desired-speed evaluation benchmark
+[Bench2Drive-Speed](https://thinklab-sjtu.github.io/Bench2Drive-Speed/) (desired-speed evaluation benchmark
 and TCP-Speed baseline, vendored under `3rd_party/Bench2Drive-Speed`, CC
 BY-NC-ND 4.0) and of
 [Bench2DriveZoo](https://github.com/Thinklab-SJTU/Bench2DriveZoo) (UniAD/VAD
@@ -970,7 +987,7 @@ If you find this work useful, please consider giving this repository a star and 
 
 ```bibtex
 @inproceedings{ClapAD2027WACV,
-	author    = {TODO},
+  author    = {Aghajanzadeh, Emad and Schwarzfischer, Thomas and Kaufeld, Marc and Thoma, Moritz and P{\'e}goud, Ryan and Vemparala, Manoj Rohit and Mori, Pierpaolo and Fasfous, Nael and Betz, Johannes and Mueller-Gritschneder, Daniel and Schlichtmann, Ulf},
 	title     = {Closed-Loop Aware Planning via Imitation-Free Speed Scoring for End-to-End Autonomous Driving},
 	booktitle = {IEEE/CVF Winter Conference on Applications of Computer Vision (WACV)},
 	year      = {2027},

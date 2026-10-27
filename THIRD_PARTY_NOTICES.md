@@ -33,7 +33,7 @@ subdirectory.
 ## Vendored under `3rd_party/Bench2Drive-Speed/` — ⚠️ CC BY-NC-ND 4.0
 
 `3rd_party/Bench2Drive-Speed` vendors the
-[Bench2Drive-Speed](https://github.com/) benchmark (Shao et al., desired-speed
+[Bench2Drive-Speed](https://thinklab-sjtu.github.io/Bench2Drive-Speed/) benchmark (Shao et al., desired-speed
 evaluation) **unmodified**, under **Creative Commons
 Attribution-NonCommercial-NoDerivatives 4.0** (see
 `3rd_party/Bench2Drive-Speed/LICENSE`). This includes its bundled TCP-Speed
@@ -59,8 +59,7 @@ under **CC BY-NC-ND 4.0**. Because that license forbids redistributing
 derivative works, and a CLAP-AD-modified UniAD/VAD planning head is exactly
 that, **this repository does not include any UniAD/VAD code or checkpoints**.
 The paper's UniAD/VAD numbers are still reported (as read-only reference
-values) in the [results/](results/) tables and the root README for
-completeness, with no code or weights attached — only the TFv6 (CARLA) and
+values) in the root README for completeness, with no code or weights attached — only the TFv6 (CARLA) and
 LTFv6 (NAVSIM) implementations of CLAP-AD are released here, both original
 LEAD/CLAP-AD code under this repository's own MIT license.
 

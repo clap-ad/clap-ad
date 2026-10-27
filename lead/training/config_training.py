@@ -311,6 +311,10 @@ class TrainingConfig(BaseConfig):
     def torch_float_type(self):
         """PyTorch float precision type for training."""
         if self.use_mixed_precision_training:
+            if torch.cuda.is_available() and not torch.cuda.is_bf16_supported(
+                including_emulation=False,
+            ):
+                return torch.float16
             return torch.bfloat16
         return torch.float32
 
@@ -341,7 +345,7 @@ class TrainingConfig(BaseConfig):
     # Number of data loader workers to prefetch batches.
     prefetch_factor = 2
 
-    @property
+    @overridable_property
     def compile(self):
         """If true compile the model for optimization."""
         return True
@@ -1259,7 +1263,7 @@ class TrainingConfig(BaseConfig):
                 return int(cpus_per_task)
         return 16
 
-    @property
+    @overridable_property
     def workers_per_cpu_cores(self):
         """Number of data loader workers per CPU core."""
         if not self.mixed_data_training and not self.use_carla_data:
