@@ -40,8 +40,9 @@ export NUPLAN_MAP_VERSION=nuplan-maps-v1.0
 export NUPLAN_MAPS_ROOT="${NAVSIM_ROOT}/dataset/maps"
 export NAVSIM_EXP_ROOT="${NAVSIM_ROOT}/exp"
 export NAVSIM_DEVKIT_ROOT="${DEVKIT}"
-export OPENSCENE_DATA_ROOT="${NAVSIM_ROOT}/dataset"   # raw logs for full-future GT
-export PYTHONPATH="${PROJECT_DIR}:${PYTHONPATH:-}"
+export OPENSCENE_DATA_ROOT="${OPENSCENE_DATA_ROOT:-${NAVSIM_ROOT}/dataset}"   # raw logs for full-future GT
+export CARLA_ROOT="${CARLA_ROOT:-${PROJECT_DIR}/3rd_party/CARLA_0915}"
+export PYTHONPATH="${CARLA_ROOT}/PythonAPI/carla:${PROJECT_DIR}:${PYTHONPATH:-}"
 
 echo "Split:     ${SPLIT}"
 echo "Cache dir: ${CACHE_DIR}"

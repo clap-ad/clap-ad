@@ -9,7 +9,7 @@
 # (or lower --nproc-per-node to match how many you started).
 #
 # Usage:
-#   CHECKPOINT=outputs/checkpoints/clapad_tfv6 CUDA_VISIBLE_DEVICES=0,1,2,3 \
+#   CHECKPOINT=outputs/checkpoints/clapad-tfv6 CUDA_VISIBLE_DEVICES=0,1,2,3 \
 #     scripts_clapad/eval_clapad_b2d.sh
 set -euo pipefail
 
@@ -19,8 +19,8 @@ export LEAD_CLOSED_LOOP_CONFIG="${LEAD_CLOSED_LOOP_CONFIG:-produce_debug_video=t
 IFS=',' read -ra CUDA_DEVICE_LIST <<< "$CUDA_VISIBLE_DEVICES"
 NPROC_PER_NODE="${#CUDA_DEVICE_LIST[@]}"
 
-CHECKPOINT="${CHECKPOINT:-outputs/checkpoints/clapad_tfv6}"
-ROUTES="${ROUTES:-data/benchmark_routes/bench2drive220.xml}"
+CHECKPOINT="${CHECKPOINT:-outputs/checkpoints/clapad-tfv6}"
+ROUTES="${ROUTES:-3rd_party/Bench2Drive/leaderboard/data/bench2drive220.xml}"
 
 python -u lead/leaderboard_wrapper.py \
     --checkpoint "${CHECKPOINT}" \

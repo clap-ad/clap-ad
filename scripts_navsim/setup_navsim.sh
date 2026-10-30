@@ -128,6 +128,10 @@ subprocess.check_call(
 )
 PY
 
+# Installing LEAD-only dependencies can upgrade packages shared with NAVSIM.
+# Restore NAVSIM's direct pins without resolving or replacing their dependencies.
+pip install --no-deps -r "${NAVSIM_DEVKIT_ROOT}/requirements.txt"
+
 # ---------------------------------------------------------------------------
 # Done
 # ---------------------------------------------------------------------------

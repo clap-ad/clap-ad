@@ -1,3 +1,4 @@
+import inspect
 import logging
 import os
 import time
@@ -233,11 +234,9 @@ class TrainingConfig(BaseConfig):
     @property
     def training_session_cache_path(self):
         """Path to SSD cache directory."""
-        # tmp_folder = "/scratch/" + str(os.environ.get("SLURM_JOB_ID"))
-        # if not self.is_on_tcml:
-        #     tmp_folder = str(os.environ.get("SCRATCH", f"/tmp/{os.environ['USER']}"))
-        tmp_folder = f"/workspace/.cache/tmp/{os.environ['USER']}"
-        return tmp_folder
+        return os.environ.get(
+            "TRAINING_SESSION_CACHE_PATH", f"/tmp/{os.environ['USER']}"
+        )
 
     # Root directory for CARLA sensor data.
     # carla_root = "/workspace/lead/data/carla_leaderboard2"
@@ -311,10 +310,13 @@ class TrainingConfig(BaseConfig):
     def torch_float_type(self):
         """PyTorch float precision type for training."""
         if self.use_mixed_precision_training:
-            if torch.cuda.is_available() and not torch.cuda.is_bf16_supported(
-                including_emulation=False,
-            ):
-                return torch.float16
+            if torch.cuda.is_available():
+                bf16_support = torch.cuda.is_bf16_supported
+                if "including_emulation" in inspect.signature(bf16_support).parameters:
+                    if not bf16_support(including_emulation=False):
+                        return torch.float16
+                elif not bf16_support():
+                    return torch.float16
             return torch.bfloat16
         return torch.float32
 

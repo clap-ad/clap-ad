@@ -2,7 +2,7 @@
 #
 # Stage 2: post-train CLAP-AD's planning head (path + multi-criteria speed
 # scoring) on top of a pretrained TFv6 perception backbone, on CARLA /
-# Bench2Drive. This is the CARLA counterpart of
+# LEAD. This is the CARLA counterpart of
 # scripts_navsim/posttrain_clapad_navsim.sh and reproduces the CLAP-AD/TFv6
 # numbers reported in the paper.
 #
@@ -11,7 +11,7 @@
 #
 # Usage:
 #   PRETRAINED_CKPT=outputs/local_training/pretrain/model_0030.pth \
-#     scripts_clapad/posttrain_clapad_b2d.sh
+#     scripts_clapad/posttrain_clapad_lead.sh
 set -euo pipefail
 
 export OMP_NUM_THREADS=$(nproc)
@@ -25,13 +25,15 @@ export MASTER_ADDR=127.0.0.1
 export MASTER_PORT=$((10000 + RANDOM % 50000))
 
 PRETRAINED_CKPT="${PRETRAINED_CKPT:-outputs/local_training/pretrain/model_0030.pth}"
+BATCH_SIZE="${BATCH_SIZE:-512}"
 
 export LEAD_TRAINING_CONFIG="logdir=outputs/local_training/posttrain_clapad \
     load_file=${PRETRAINED_CKPT} \
     use_planning_decoder=true \
     use_clapad_head=true \
-    num_route_points_smoothing=25 \
-    num_route_points_prediction=24 \
+    batch_size=${BATCH_SIZE} \
+    num_route_points_smoothing=42 \
+    num_route_points_prediction=40 \
     target_first_distance=1.0"
 
 torchrun --standalone \

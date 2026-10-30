@@ -104,7 +104,7 @@ def run_pdm_score(args: List[Dict[str, Union[List[str], DictConfig]]]) -> List[D
     # tokens_to_evaluate = ['a4f4a240e54e56b2', 'f203a01d3a8055f1', '8b0d50e645eb5ac7', 'c35e290a671a5084', '555af87f71415a3d', '927aa2c8ef7d5b5c', '6fed9368351f54d5', 'c195a8cb7ccb59fd', '8580d0bf545b5261', '8013f74ddcf055db', '4bda94d100d65f0d', 'b8cf57333fc65efe', '7b7d556d563f5ac4', '932938d86cfc5d6f', '42dc421e37c154e5', '52094c2441105f4d', '73ce0b2145845c71', 'eb1315c4860c5189', '0bab0d24762a596d', '63ec67c4a58a5e5b']
 
     pdm_results: List[Dict[str, Any]] = []
-    base_path_for_vis = "/workspace/temp_vis/navsim_traj"
+    base_path_for_vis = os.path.join(cfg.output_dir, "navsim_traj")
     timestamp = datetime.now().strftime("%Y.%m.%d.%H.%M.%S")
     base_path_for_vis = os.path.join(base_path_for_vis, timestamp)
     os.makedirs(base_path_for_vis, exist_ok=True)

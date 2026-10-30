@@ -27,21 +27,25 @@ export MASTER_PORT=$((10000 + RANDOM % 50000))
 
 # NAVSIM training cache built by scripts_navsim/build_navsim_cache.sh.
 NAVSIM_CACHE_DIR="${NAVSIM_CACHE_DIR:-${LEAD_PROJECT_ROOT:-.}/data/navsim_training_cache/navtrain}"
+BATCH_SIZE="${BATCH_SIZE:-64}"
+EPOCHS="${EPOCHS:-30}"
+TRAINING_LOG_DIR="${TRAINING_LOG_DIR:-outputs/local_training/pretrain_navsim}"
 
 echo "Using GPUs: $CUDA_VISIBLE_DEVICES for training"
 echo "NAVSIM cache: $NAVSIM_CACHE_DIR"
 
-export LEAD_TRAINING_CONFIG="logdir=outputs/local_training/pretrain_navsim \
+export LEAD_TRAINING_CONFIG="logdir=${TRAINING_LOG_DIR} \
+    log_clearml=false \
     use_planning_decoder=false \
     use_navsim_data=true \
     use_carla_data=true \
     LTF=true \
     use_clapad_head=false \
     navsim_data_root=${NAVSIM_CACHE_DIR} \
-    epochs=30 \
+    epochs=${EPOCHS} \
     image_architecture=resnet34 \
     lidar_architecture=resnet34 \
-    batch_size=64"
+    batch_size=${BATCH_SIZE}"
 
 torchrun --standalone \
     --nnodes=1 \

@@ -13,11 +13,11 @@
 # lead/inference/config_closed_loop.py).
 #
 # Usage:
-#   CHECKPOINT=outputs/checkpoints/clapad_tfv6 scripts_clapad/eval_clapad_b2dspeed.sh
+#   CHECKPOINT=outputs/checkpoints/clapad-tfv6 scripts_clapad/eval_clapad_b2dspeed.sh
 set -euo pipefail
 
-CHECKPOINT="${CHECKPOINT:-outputs/checkpoints/clapad_tfv6}"
-ROUTES="${ROUTES:-data/benchmark_routes/b2dspd_eval48.xml}"
+CHECKPOINT="${CHECKPOINT:-outputs/checkpoints/clapad-tfv6}"
+ROUTES="${ROUTES:-3rd_party/Bench2Drive-Speed/Bench2Drive/leaderboard/data/b2dspd_eval48.xml}"
 
 python -u lead/leaderboard_wrapper.py \
     --checkpoint "${CHECKPOINT}" \

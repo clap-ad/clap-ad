@@ -30,6 +30,7 @@ echo "Using GPUs: $CUDA_VISIBLE_DEVICES for training"
 echo "Pretrained ckpt: $PRETRAINED_CKPT"
 
 export LEAD_TRAINING_CONFIG="logdir=outputs/local_training/posttrain_navsim_baseline \
+    log_clearml=false \
     load_file=${PRETRAINED_CKPT} \
     use_planning_decoder=true \
     use_navsim_data=true \

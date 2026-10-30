@@ -28,19 +28,27 @@ export MASTER_PORT=$((10000 + RANDOM % 50000))
 
 PRETRAINED_CKPT="${PRETRAINED_CKPT:-outputs/local_training/pretrain_navsim/model_0029.pth}"
 NAVSIM_CACHE_DIR="${NAVSIM_CACHE_DIR:-${LEAD_PROJECT_ROOT:-.}/data/navsim_training_cache/navtrain}"
+LTF="${LTF:-true}"
+BATCH_SIZE="${BATCH_SIZE:-64}"
+EPOCHS="${EPOCHS:-61}"
+NAVSIM_NUM_SAMPLES="${NAVSIM_NUM_SAMPLES:--1}"
+TRAINING_LOG_DIR="${TRAINING_LOG_DIR:-outputs/local_training/posttrain_clapad_navsim}"
+COMPILE="${COMPILE:-true}"
 
 echo "Using GPUs: $CUDA_VISIBLE_DEVICES for training"
 echo "Pretrained ckpt: $PRETRAINED_CKPT"
 echo "NAVSIM cache: $NAVSIM_CACHE_DIR"
 
-export LEAD_TRAINING_CONFIG="logdir=outputs/local_training/posttrain_clapad_navsim \
+export LEAD_TRAINING_CONFIG="logdir=${TRAINING_LOG_DIR} \
+    log_clearml=false \
     load_file=${PRETRAINED_CKPT} \
     use_planning_decoder=true \
     use_navsim_data=true \
     use_carla_data=false \
-    LTF=false \
+    LTF=${LTF} \
     use_clapad_head=true \
     navsim_data_root=${NAVSIM_CACHE_DIR} \
+    navsim_num_samples=${NAVSIM_NUM_SAMPLES} \
     num_route_points_smoothing=50 \
     num_route_points_prediction=48 \
     ttc_time_horizon=4.0 \
@@ -49,8 +57,9 @@ export LEAD_TRAINING_CONFIG="logdir=outputs/local_training/posttrain_clapad_navs
     target_first_distance=1.0 \
     use_fde_loss=true \
     lr=1e-4 \
-    epochs=90 \
-    batch_size=64"
+    compile=${COMPILE} \
+    epochs=${EPOCHS} \
+    batch_size=${BATCH_SIZE}"
 
 torchrun --standalone \
     --nnodes=1 \
