@@ -398,6 +398,7 @@ class LeaderboardEvaluator(object):
 
     def _merge_rank_results(self):
         """Merge all per-rank checkpoint JSONs into merged.json using Bench2Drive's merge_route_json."""
+        return
         # Import merge utility from Bench2Drive tools
         try:
             sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'tools'))

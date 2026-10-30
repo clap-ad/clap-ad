@@ -1,6 +1,12 @@
 MIT License
 
+Copyright (c) 2025 Long Nguyen
 Copyright (c) 2026 clap-ad
+
+This license applies to original CLAP-AD contributions and model checkpoints,
+and to LEAD-derived software to the extent permitted by the upstream LEAD
+license. Components identified in THIRD_PARTY_NOTICES.md remain under their
+stated licenses.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

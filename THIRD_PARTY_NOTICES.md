@@ -1,26 +1,32 @@
 # Third-Party Notices
 
-This repository (built on the [LEAD](https://github.com/kesai-labs/lead)
-codebase) vendors or depends on several third-party projects under
-`3rd_party/`. This file lists their licenses. **This is provided for
-convenience and is not legal advice** — please review the upstream licenses
-yourself before any commercial use.
+This repository builds on [LEAD](https://github.com/kesai-labs/lead) and
+contains vendored components under `3rd_party/`. The root [LICENSE](LICENSE)
+covers original CLAP-AD contributions, released checkpoints, and LEAD-derived
+software only within the scope stated there. It does not replace the component
+licenses below. This inventory is not legal advice.
 
 ## MIT-licensed components
 
 | Path | Project | License |
 | :--- | :--- | :--- |
 | `3rd_party/Bench2Drive/leaderboard`, `3rd_party/Bench2Drive/scenario_runner` | [Bench2Drive](https://github.com/Thinklab-SJTU/Bench2Drive) vendored CARLA components | MIT |
+| `data/benchmark_routes/bench2drive` | Per-route copies of `3rd_party/Bench2Drive/leaderboard/data/bench2drive220.xml` | MIT, from the nested CARLA Leaderboard component |
 | `3rd_party/Bench2Drive-Speed/Bench2Drive/leaderboard`, `.../scenario_runner` | Bench2Drive-Speed vendored CARLA components | MIT |
 | `3rd_party/Bench2Drive-Speed/pdm_lite_speed/leaderboard`, `.../scenario_runner` | PDM-Lite vendored CARLA components | MIT |
 | `3rd_party/leaderboard`, `3rd_party/leaderboard_autopilot` | [CARLA Leaderboard](https://github.com/carla-simulator/leaderboard) | MIT |
 | `3rd_party/scenario_runner`, `3rd_party/scenario_runner_autopilot` | [CARLA Scenario Runner](https://github.com/carla-simulator/scenario_runner) | MIT |
+| `3rd_party/fail2drive` | [Fail2Drive](https://github.com/autonomousvision/fail2drive) | MIT |
 | `3rd_party/carla_route_generator` | [carla_route_generator](https://github.com/autonomousvision) | MIT |
 
 These entries refer only to the listed MIT-licensed components, not their
 parent benchmark trees. Preserve the upstream copyright and license notices.
-The Fail2Drive root MIT license is included at `3rd_party/fail2drive/LICENSE`;
-its nested CARLA components also retain their own license files.
+The Bench2Drive route files are exact XML copies of the MIT-licensed aggregate
+route file listed above. CLAP-AD's multi-GPU and route-merging changes are in
+the nested MIT-licensed CARLA Leaderboard code. The modified merger utility is
+kept in that MIT subtree; the CC BY-NC-ND-only upstream `tools/merge_route_json.py`
+is unmodified. Fail2Drive's root MIT license is included, and its nested CARLA
+components retain their own license files.
 
 ## Apache-2.0-licensed components
 
@@ -30,8 +36,9 @@ its nested CARLA components also retain their own license files.
 | `3rd_party/Bench2Drive-Speed/pdm_lite_speed` | PDM-Lite | Apache License 2.0, except nested separately licensed CARLA subtrees |
 | Released checkpoint image encoders | [timm/resnet34.a1_in1k](https://huggingface.co/timm/resnet34.a1_in1k) (CARLA) and [timm/regnety_032.ra_in1k](https://huggingface.co/timm/regnety_032.ra_in1k) (NAVSIM) pretrained weights | Apache License 2.0 |
 
-The applicable Apache-2.0 `LICENSE` files are retained. Preserve any upstream
-`NOTICE` file if one is included in a future source update.
+The Apache-2.0 `LICENSE` files for the vendored NAVSIM and PDM-Lite sources are
+retained. Include the Apache-2.0 license and preserve any upstream `NOTICE`
+file when redistributing pretrained timm weights or future source updates.
 
 Both released checkpoints include fine-tuned image encoders initialized from
 these pretrained weights. Preserve their license and attribution when
@@ -39,37 +46,41 @@ redistributing the checkpoints.
 
 ## Benchmark materials under CC BY-NC-ND 4.0
 
-The Bench2Drive project states that its assets and code are under CC BY-NC-ND
-4.0 unless separately licensed (see
-`3rd_party/Bench2Drive/LICENSE` and its README). Its nested
-`leaderboard/` and `scenario_runner/` directories carry separate MIT licenses.
-The 220 XML route files under `data/benchmark_routes/bench2drive/` are
-benchmark-derived material; preserve their attribution and confirm the scope
-of the applicable benchmark license before redistributing them.
+The Bench2Drive project states that its materials are under CC BY-NC-ND 4.0
+unless separately licensed (see `3rd_party/Bench2Drive/LICENSE` and its
+README). Its root-level documentation, assets, and tools remain under that
+license; the nested `leaderboard/` and `scenario_runner/` directories have
+separate MIT licenses. Bench2Drive materials are attributed to Xiaosong Jia,
+Zhenjie Yang, Qifeng Li, Zhiyuan Zhang, and Junchi Yan; see the upstream
+[paper](https://arxiv.org/abs/2406.03877).
 
 `3rd_party/Bench2Drive-Speed` likewise contains the
 [Bench2Drive-Speed](https://thinklab-sjtu.github.io/Bench2Drive-Speed/)
 benchmark (Shao et al.) and its bundled TCP-Speed baseline
 (`3rd_party/Bench2Drive-Speed/TCP`), which CLAP-AD does **not** use. The root
-benchmark files, `Bench2Drive/` assets, and `TCP/` are marked CC BY-NC-ND 4.0,
-with separately licensed nested components such as the `Bench2Drive/leaderboard`
-and `pdm_lite_speed/` Apache-2.0 subtrees.
+documentation and assets, `Bench2Drive/` materials, and `TCP/` are marked
+CC BY-NC-ND 4.0 unless a nested license says otherwise. The nested CARLA
+`leaderboard/` and `scenario_runner/` trees are MIT; `pdm_lite_speed/` is
+Apache-2.0 except for its nested separately licensed CARLA trees. Bench2Drive-
+Speed is attributed to Yuqian Shao, Xiaosong Jia, Langechuan Liu, and Junchi
+Yan; see the upstream [paper](https://arxiv.org/abs/2603.25672).
 
-The multi-GPU evaluator at
-`3rd_party/Bench2Drive-Speed/Bench2Drive/leaderboard/leaderboard/leaderboard_evaluator_multigpu.py`
-is an adaptation of the CARLA MIT-licensed evaluator and resides in the
-nested MIT-licensed `Bench2Drive/leaderboard` subtree. It retains the upstream
-MIT notice. The separate `route_speed.py` helper is also under that subtree's
-MIT license. This is distinct from the CC BY-NC-ND benchmark assets; confirm
-that the included evaluator changes contain no copied CC BY-NC-ND material.
+The multi-GPU evaluator and `route_speed.py` helper in the nested
+`Bench2Drive/leaderboard` subtree are under that subtree's MIT license. The
+multi-GPU evaluators and the changed standard evaluator retain their upstream
+copyright and MIT headers. The CLAP-AD route-merging utility is kept in the
+MIT-licensed `3rd_party/Bench2Drive/leaderboard` subtree. These code changes
+do not change the license of the surrounding benchmark materials.
 
-The benchmark materials remain subject to **Creative Commons
-Attribution-NonCommercial-NoDerivatives 4.0** (see
-`3rd_party/Bench2Drive-Speed/LICENSE`). The license allows noncommercial
-sharing of unadapted material with attribution; it does not grant permission
-to use the material commercially or to share adapted material. Obtain
-permission from the relevant rights holders for those uses. This notice is
-not legal advice.
+The CC BY-NC-ND materials are included unmodified and remain under their
+upstream licenses; the copied license files and source acknowledgments are
+retained. The Bench2Drive materials are from
+[Thinklab-SJTU/Bench2Drive](https://github.com/Thinklab-SJTU/Bench2Drive);
+the Bench2Drive-Speed materials are from the
+[official project](https://github.com/Thinklab-SJTU/Bench2Drive-Speed).
+That license permits sharing unadapted material with attribution for
+noncommercial purposes. It does not grant commercial-use rights or permission
+to share adaptations. Obtain separate permission for those uses.
 
 ## NOT included: UniAD / VAD CLAP-AD variants (Bench2DriveZoo)
 
@@ -86,13 +97,13 @@ license for LEAD-derived and CLAP-AD-modified code must be determined from the
 root license together with the upstream notices and the rights holders'
 authorization; this notice does not establish ownership.
 
-## First-party utilities without a separate license
+## LEAD-carried utilities
 
-`3rd_party/typings/carla` (type stubs for the CARLA Python API) and
-`3rd_party/vscode_pydata_viewer` (a small pickle viewer) are carried in the
-LEAD codebase. Retain their upstream attribution and license notices; apply
-this repository's MIT license only to original contributions whose rights
-holders have authorized that license.
+`3rd_party/typings/carla` (CARLA API type stubs) and
+`3rd_party/vscode_pydata_viewer` (a pickle viewer) are carried from LEAD and
+are covered by the upstream LEAD MIT notice retained in the root [LICENSE](LICENSE).
+This does not replace any additional third-party rights that may apply to
+generated API declarations or external assets.
 
 ## CARLA simulator itself
 
