@@ -8,8 +8,8 @@
 <p align="center">
   <a href="https://arxiv.org/pdf/2610.36079">Paper</a>&nbsp; · &nbsp;
   <a href="https://clap-ad.github.io/">Project page</a>&nbsp; · &nbsp;
-  <a href="https://huggingface.co/thomasschwarzfischer/clap-ad-tfv6">CARLA checkpoint</a>&nbsp; · &nbsp;
-  <a href="https://huggingface.co/thomasschwarzfischer/clap-ad-ltfv6-navsim">NAVSIM checkpoint</a>&nbsp; · &nbsp;
+  <a href="https://huggingface.co/clap-ad/clap-ad-tfv6">CARLA checkpoint</a>&nbsp; · &nbsp;
+  <a href="https://huggingface.co/clap-ad/clap-ad-ltfv6-navsim">NAVSIM checkpoint</a>&nbsp; · &nbsp;
   <a href="#citation">Citation</a>
 </p>
 
@@ -127,14 +127,14 @@ bash scripts/start_carla.sh 30000
 ## CARLA evaluation
 
 Download the CARLA TFv6 + CLAP-AD checkpoint from
-[Hugging Face](https://huggingface.co/thomasschwarzfischer/clap-ad-tfv6).
+[Hugging Face](https://huggingface.co/clap-ad/clap-ad-tfv6).
 The directory must contain both `config.json` and `model_0030.pth`; the config
 is required by the inference agent.
 
 ```bash
 conda activate clapad
 cd /path/to/clapad-dev
-python -c 'from huggingface_hub import snapshot_download; snapshot_download(repo_id="thomasschwarzfischer/clap-ad-tfv6", local_dir="outputs/checkpoints/clapad-tfv6")'
+python -c 'from huggingface_hub import snapshot_download; snapshot_download(repo_id="clap-ad/clap-ad-tfv6", local_dir="outputs/checkpoints/clapad-tfv6")'
 ```
 
 With CARLA running on port `30000`, evaluate Town01 route `24211` from the

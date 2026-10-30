@@ -1,7 +1,7 @@
 <h1 align="center"><b>CLAP-AD — NAVSIM Implementation</b></h1>
 
 <p align="center">
-  <a href="../../README.md">CARLA README</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://arxiv.org/abs/2610.36079">Paper</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://clap-ad.github.io/">Project page</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://huggingface.co/thomasschwarzfischer/clap-ad-ltfv6-navsim">NAVSIM checkpoint</a>
+  <a href="../../README.md">CARLA README</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://arxiv.org/abs/2610.36079">Paper</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://clap-ad.github.io/">Project page</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="https://huggingface.co/clap-ad/clap-ad-ltfv6-navsim">NAVSIM checkpoint</a>
 </p>
 
 This guide documents the supplementary NAVSIM v2 experiments. The model uses
@@ -150,7 +150,7 @@ reproduce those metrics. The NAVSIM v1.1 commands above are for its separate
 ## Checkpoints
 
 ```bash
-python -c 'from huggingface_hub import snapshot_download; snapshot_download(repo_id="thomasschwarzfischer/clap-ad-ltfv6-navsim", local_dir="outputs/checkpoints/clap-ad-ltfv6-navsim")'
+python -c 'from huggingface_hub import snapshot_download; snapshot_download(repo_id="clap-ad/clap-ad-ltfv6-navsim", local_dir="outputs/checkpoints/clap-ad-ltfv6-navsim")'
 ```
 
 The checkpoint directory includes `config.json` and `model_0060.pth`; NAVSIM's
