@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <a href="https://arxiv.org/pdf/2610.36079">Paper</a>&nbsp; · &nbsp;
+  <a href="https://arxiv.org/abs/2610.36079">Paper</a>&nbsp; · &nbsp;
   <a href="https://clap-ad.github.io/">Project page</a>&nbsp; · &nbsp;
   <a href="https://huggingface.co/clap-ad/clap-ad-tfv6">CARLA checkpoint</a>&nbsp; · &nbsp;
   <a href="https://huggingface.co/clap-ad/clap-ad-ltfv6-navsim">NAVSIM checkpoint</a>&nbsp; · &nbsp;
@@ -231,9 +231,6 @@ for this CLAP-AD repository.
 
 This work builds on [LEAD](https://github.com/kesai-labs/lead) and uses CARLA,
 the CARLA Leaderboard, ScenarioRunner, Bench2Drive, and Bench2Drive-Speed.
-We thank Long Nguyen for leading the LEAD codebase, and Kashyap Chitta,
-Bernhard Jaeger, Andreas Geiger, and Daniel Dauner for their contributions and
-guidance.
 
 This repository is released under the [MIT License](LICENSE), subject to the
 third-party terms in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
@@ -242,7 +239,8 @@ third-party terms in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ```bibtex
 @inproceedings{ClapAD2027WACV,
-  author    = {Aghajanzadeh, Emad and Schwarzfischer, Thomas and Kaufeld, Marc and Thoma, Moritz and P{\'e}goud, Ryan and Vemparala, Manoj Rohit and
+  author    = {Aghajanzadeh, Emad and Schwarzfischer, Thomas and Kaufeld, Marc and 
+               Thoma, Moritz and P{\'e}goud, Ryan and Vemparala, Manoj Rohit and
                Mori, Pierpaolo and Fasfous, Nael and Betz, Johannes and
                Mueller-Gritschneder, Daniel and Schlichtmann, Ulf},
   title     = {Closed-Loop Aware Planning via Imitation-Free Speed Scoring for
@@ -252,7 +250,7 @@ third-party terms in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 }
 ```
 
-The CARLA implementation builds on LEAD. Please cite it when using that
+Our implementation builds on TFv6 and LEAD. Please cite it when using the
 training and evaluation stack:
 
 ```bibtex
